@@ -1,0 +1,19 @@
+{
+    "name": "paper-index-tool",
+    "owner": {
+        "name": "Dennis Vriend",
+        "email": "dvriend@ilionx.com",
+        "url": "https://github.com/dnvriend"
+    },
+    "metadata": {
+        "description": "Marketplace for paper-index-tool CLI plugin - A Python CLI tool",
+        "version": "0.1.0"
+    },
+    "plugins": [
+        {
+            "name": "paper-index-tool",
+            "source": "./plugins/paper-index-tool",
+            "description": "A Python CLI tool"
+        }
+    ]
+}
