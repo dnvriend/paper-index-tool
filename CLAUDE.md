@@ -2,11 +2,17 @@
 
 ## Goal
 
-A Python CLI tool
+A Python CLI tool for indexing, searching, and managing academic paper, book, and media metadata and content.
 
 ## What is paper-index-tool?
 
-`paper-index-tool` is a command-line utility built with modern Python tooling and best practices.
+`paper-index-tool` is a command-line utility that provides:
+
+- **Searchable index** of academic papers, books, and media with BM25 full-text search
+- **Structured metadata storage** for bibtex fields and content (abstract, method, results, claims, etc.)
+- **Quick field access** for citation validation and reference management
+- **Bibtex export** for integration with LaTeX and reference managers
+- **Media support** for video, podcast, and blog content with timestamp-based quotes
 
 ## Technical Requirements
 
@@ -19,6 +25,9 @@ A Python CLI tool
 ### Dependencies
 
 - `typer` - CLI framework (built on Click with type hints)
+- `pydantic` - Data validation and serialization
+- `bm25s` - BM25 search algorithm (Rust-based)
+- `PyStemmer` - Stemming for search tokenization
 
 ### Optional Dependencies
 
@@ -35,21 +44,134 @@ A Python CLI tool
 - `pip-audit` - Dependency vulnerability scanning
 - `gitleaks` - Secret detection (requires separate installation)
 
-## CLI Arguments
+## CLI Commands
 
-```bash
-paper-index-tool [OPTIONS]
+### Global Options
+
+| Option | Description |
+|--------|-------------|
+| `-v, --verbose` | Verbosity level: -v=INFO, -vv=DEBUG, -vvv=TRACE |
+| `--telemetry` | Enable OpenTelemetry (or set OTEL_ENABLED=true) |
+| `--help` / `-h` | Show help message |
+| `--version` | Show version |
+
+### Command Structure
+
+```
+paper-index-tool
+├── paper              # Paper management
+│   ├── create, show, update, delete, list, clear
+│   ├── abstract, question, method, gaps, results, claims, quotes
+│   ├── file-path-pdf, file-path-md, bibtex, query
+├── book               # Book management (same structure as paper)
+├── media              # Media management (video, podcast, blog)
+│   ├── create, show, update, delete, list, clear
+│   ├── abstract, question, method, gaps, results, claims, quotes
+│   ├── transcript, file-path-md, bibtex, query
+├── stats              # Statistics across all entries
+├── query              # BM25 search across all entries
+├── reindex            # Rebuild search index
+├── export             # Export all data to JSON
+├── import             # Import from JSON backup
+├── create-from-json   # Create entry from JSON file
+├── update-from-json   # Update entry from JSON file
+└── completion         # Shell completion
 ```
 
-### Options
+### Paper Commands
 
-- `-v, --verbose` - Enable verbose output (count flag: -v, -vv, -vvv)
-  - `-v` (count=1): INFO level logging
-  - `-vv` (count=2): DEBUG level logging
-  - `-vvv` (count=3+): TRACE level (includes library internals)
-- `--telemetry` - Enable OpenTelemetry observability (or set OTEL_ENABLED=true)
-- `--help` / `-h` - Show help message
-- `--version` - Show version
+```bash
+# CRUD
+paper-index-tool paper create <id> [--field value...]
+paper-index-tool paper show <id> [--format json]
+paper-index-tool paper update <id> [--field value...]
+paper-index-tool paper delete <id> [--force]
+paper-index-tool paper list [--format json] [--count]
+paper-index-tool paper clear --approve
+
+# Field queries (quick access)
+paper-index-tool paper abstract <id>
+paper-index-tool paper question <id>
+paper-index-tool paper method <id>
+paper-index-tool paper gaps <id>
+paper-index-tool paper results <id>
+paper-index-tool paper claims <id>
+paper-index-tool paper quotes <id>
+paper-index-tool paper file-path-pdf <id>
+paper-index-tool paper file-path-md <id>
+
+# Export and search
+paper-index-tool paper bibtex <id>
+paper-index-tool paper query <id> "search terms" [--fragments]
+```
+
+### Media Commands
+
+```bash
+# Create (required: --type, --author, --title, --year, --url, --access-date, --file-path-md)
+paper-index-tool media create <id> --type video|podcast|blog ...
+
+# Type-specific fields:
+# - video: --platform, --channel, --duration, --video-id
+# - podcast: --show-name, --episode, --season, --host, --guest
+# - blog: --website, --last-updated
+
+# AI tracking fields: --ai-generated, --ai-provider, --ai-model
+```
+
+### Search Commands
+
+```bash
+# Search all entries
+paper-index-tool query "search terms" --all [--fragments] [-C <context>] [-n <num>]
+
+# Search single entry
+paper-index-tool query "search terms" --paper <id>
+paper-index-tool query "search terms" --book <id>
+
+# Rebuild search index
+paper-index-tool reindex
+```
+
+### Import/Export
+
+```bash
+paper-index-tool export backup.json [--force]
+paper-index-tool import backup.json [--replace|--merge] [--dry-run]
+paper-index-tool create-from-json entry.json
+paper-index-tool update-from-json entry.json
+```
+
+### Data Models
+
+**Paper Fields**:
+- Bibtex: author, title, year, journal, volume, number, issue, pages, publisher, doi, url
+- Files: file_path_pdf, file_path_markdown
+- Meta: keywords, rating (1-5), peer_reviewed
+- Content: abstract, question, method, gaps, results, interpretation, claims, quotes, full_text
+
+**Book Fields**:
+- Bibtex: author, title, year, chapter, pages, publisher, isbn, url
+- Files: file_path_pdf, file_path_markdown
+- Meta: keywords
+- Content: (same as paper)
+
+**Media Fields**:
+- Core: media_type (video|podcast|blog), author, title, year, url, access_date
+- Video: platform, channel, duration, video_id
+- Podcast: show_name, episode, season, host, guest, duration
+- Blog: website, last_updated
+- AI: ai_generated, ai_provider, ai_model
+- Content: (same as paper, with timestamp-based quotes)
+
+## Data Storage
+
+| Path | Description |
+|------|-------------|
+| `~/.config/paper-index-tool/papers.json` | Paper entries |
+| `~/.config/paper-index-tool/books.json` | Book entries |
+| `~/.config/paper-index-tool/media.json` | Media entries |
+| `~/.config/paper-index-tool/bm25s/` | BM25 search index |
 
 ## Project Structure
 
@@ -57,34 +179,28 @@ paper-index-tool [OPTIONS]
 paper-index-tool/
 ├── paper_index_tool/
 │   ├── __init__.py
-│   ├── cli.py            # Typer CLI entry point (app with subcommands)
-│   ├── completion.py     # Shell completion command
-│   ├── logging_config.py # Multi-level verbosity logging + file logging
-│   ├── telemetry/        # OpenTelemetry observability
+│   ├── cli.py              # Typer CLI entry point (~3500 lines)
+│   ├── models.py           # Paper, Book, Media, Quote Pydantic models
+│   ├── search.py           # BM25 search (PaperSearcher, BookSearcher, CombinedSearcher)
+│   ├── completion.py       # Shell completion (bash, zsh, fish)
+│   ├── logging_config.py   # Multi-level verbosity logging
+│   ├── storage/
 │   │   ├── __init__.py
-│   │   ├── config.py     # TelemetryConfig dataclass
-│   │   ├── service.py    # TelemetryService singleton
-│   │   ├── decorators.py # @traced decorator, trace_span context manager
-│   │   └── exporters.py  # Exporter factory (console, OTLP) for traces/metrics/logs
-│   └── utils.py          # Utility functions
+│   │   ├── paths.py        # Config paths (~/.config/paper-index-tool/)
+│   │   └── registry.py     # PaperRegistry, BookRegistry, MediaRegistry
+│   ├── telemetry/          # OpenTelemetry (optional)
+│   │   ├── config.py       # TelemetryConfig
+│   │   ├── service.py      # TelemetryService singleton
+│   │   ├── decorators.py   # @traced, trace_span
+│   │   └── exporters.py    # Console, OTLP exporters
+│   └── utils.py
 ├── tests/
-│   ├── __init__.py
-│   └── test_utils.py
-├── references/           # Observability stack reference configs
-│   ├── docker-compose.yml
-│   ├── alloy/            # Grafana Alloy config
-│   ├── prometheus/       # Prometheus config
-│   ├── loki/             # Loki config
-│   ├── tempo/            # Tempo config
-│   └── grafana/          # Grafana datasource provisioning
-├── pyproject.toml        # Project configuration
-├── README.md             # User documentation
-├── CLAUDE.md             # This file
-├── Makefile              # Development commands
-├── LICENSE               # MIT License
-├── .mise.toml            # mise configuration
-├── .gitleaks.toml        # Gitleaks configuration
-└── .gitignore
+├── references/             # Feature specs, observability stack configs
+├── .claude/commands/       # Slash commands for Claude
+├── pyproject.toml
+├── README.md
+├── CLAUDE.md
+└── Makefile
 ```
 
 ## Code Style
