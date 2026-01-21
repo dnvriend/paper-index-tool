@@ -201,9 +201,7 @@ class TextChunker:
 
         return chunks
 
-    def _annotate_lines(
-        self, lines: list[str]
-    ) -> list[dict[str, Any]]:
+    def _annotate_lines(self, lines: list[str]) -> list[dict[str, Any]]:
         """Annotate lines with page and section info.
 
         Args:
@@ -229,12 +227,14 @@ class TextChunker:
             if section_match:
                 current_section = section_match.group(1).strip()
 
-            annotated.append({
-                "line_num": line_num,
-                "text": line,
-                "page": current_page,
-                "section": current_section,
-            })
+            annotated.append(
+                {
+                    "line_num": line_num,
+                    "text": line,
+                    "page": current_page,
+                    "section": current_section,
+                }
+            )
 
         return annotated
 
@@ -266,12 +266,14 @@ class TextChunker:
                 continue
             words = line_text.split()
             for word in words:
-                words_with_meta.append({
-                    "word": word,
-                    "line_num": line_data["line_num"],
-                    "page": line_data["page"],
-                    "section": line_data["section"],
-                })
+                words_with_meta.append(
+                    {
+                        "word": word,
+                        "line_num": line_data["line_num"],
+                        "page": line_data["page"],
+                        "section": line_data["section"],
+                    }
+                )
 
         if not words_with_meta:
             return []

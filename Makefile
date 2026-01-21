@@ -48,7 +48,7 @@ build: ## Build package (force rebuild)
 
 install-global: build ## Install globally with uv tool (rebuilds first to avoid cache issues)
 	-uv tool uninstall paper-index-tool 2>/dev/null
-	uv tool install . --reinstall
+	uv tool install ".[vector]" --reinstall --python 3.14
 
 uninstall-global: ## Uninstall global installation
 	uv tool uninstall paper-index-tool

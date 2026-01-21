@@ -80,8 +80,11 @@ class BedrockEmbeddings:
             return self._client
 
         try:
-            import boto3
-            from botocore.exceptions import NoCredentialsError, ProfileNotFound
+            import boto3  # type: ignore[import-not-found]
+            from botocore.exceptions import (  # type: ignore[import-not-found]
+                NoCredentialsError,
+                ProfileNotFound,
+            )
         except ImportError:
             raise ImportError(
                 "boto3 is required for vector search. "

@@ -82,7 +82,7 @@ class VectorSearcher:
             ImportError: If faiss-cpu is not installed.
         """
         try:
-            import faiss
+            import faiss  # type: ignore[import-not-found]
 
             return faiss
         except ImportError:
