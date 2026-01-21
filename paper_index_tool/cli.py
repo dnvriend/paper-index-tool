@@ -1294,6 +1294,28 @@ def paper_quotes(
             typer.echo(f'[{i}] "{q.text}" (p. {q.page})')
 
 
+@paper_app.command(name="add-quote")
+def paper_add_quote(
+    paper_id: Annotated[str, typer.Argument(help="Paper ID")],
+    text: Annotated[str, typer.Argument(help="Quote text (verbatim)")],
+    page: Annotated[int, typer.Argument(help="Page number")],
+) -> None:
+    """Add a quote to a paper.
+
+    \b
+    Examples:
+        paper-index-tool paper add-quote ashford2012 "Leadership is a process..." 17
+    """
+    paper = _get_paper_or_exit(paper_id)
+    registry = PaperRegistry()
+
+    new_quote = Quote(text=text, page=page)
+    updated_quotes = paper.quotes + [new_quote]
+
+    registry.update_entry(paper_id, {"quotes": [q.model_dump() for q in updated_quotes]})
+    typer.echo(f"Added quote to paper '{paper_id}' (page {page})")
+
+
 @paper_app.command(name="file-path-pdf")
 def paper_file_path_pdf(
     paper_id: Annotated[str, typer.Argument(help="Paper ID")],
@@ -3672,7 +3694,9 @@ def update_from_json(
 
 @app.command(name="query")
 def query_command(
-    search_query: Annotated[str, typer.Argument(help="Search terms (BM25 ranked)")],
+    search_query: Annotated[
+        str, typer.Argument(help="Search terms (BM25) or natural language (semantic)")
+    ],
     paper_id: Annotated[
         str | None, typer.Option("--paper", "-p", help="Search single paper by ID")
     ] = None,
@@ -3681,6 +3705,9 @@ def query_command(
     ] = None,
     all_entries: Annotated[
         bool, typer.Option("--all", "-a", help="Search all papers, books, and media")
+    ] = False,
+    semantic: Annotated[
+        bool, typer.Option("--semantic", "-s", help="Semantic search (natural language)")
     ] = False,
     fragments: Annotated[
         bool, typer.Option("--fragments", help="Include matching text fragments in output")
@@ -3693,13 +3720,18 @@ def query_command(
         OutputFormat, typer.Option("--format", "-f", help="Output format: human or json")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """BM25 full-text search across papers, books, and media.
+    """Full-text search across papers, books, and media.
 
     \b
     SEARCH MODES (mutually exclusive, one required):
         --paper <id>    Search within a single paper's full text
         --book <id>     Search within a single book's full text
         --all           Search across ALL indexed entries
+
+    \b
+    SEARCH TYPE:
+        (default)       BM25 keyword search - use keywords like "leadership identity"
+        --semantic, -s  Semantic search - use natural language like "How do leaders develop?"
 
     \b
     OUTPUT OPTIONS:
@@ -3710,8 +3742,14 @@ def query_command(
 
     \b
     EXAMPLES:
-        # Search all entries for leadership topics
+        # BM25 keyword search
         paper-index-tool query "leadership identity development" --all
+
+        # Semantic search with natural language question
+        paper-index-tool query "How do individuals develop as leaders?" --all -s
+
+        # Semantic search works across languages
+        paper-index-tool query "Wat gebeurt er met leiderschap bij thuiswerken?" --all -s
 
         # Search with context fragments
         paper-index-tool query "qualitative research" --all --fragments -C 3
@@ -3719,12 +3757,13 @@ def query_command(
         # Search single paper, JSON output
         paper-index-tool query "narcissism" --paper cesinger2023 --format json
 
-        # Top 5 results only
-        paper-index-tool query "organizational behavior" --all -n 5
-
     \b
     JSON OUTPUT SCHEMA:
         [{"id": "...", "type": "paper|book|media", "score": 0.85, "title": "..."}]
+
+    \b
+    NOTE: Semantic search requires AWS Bedrock access. Build vector index first:
+        paper-index-tool reindex --vectors
     """
     from paper_index_tool.search import PaperSearcher
 
@@ -3811,8 +3850,49 @@ def query_command(
 
         return
 
-    # Use CombinedSearcher for --all, PaperSearcher for single paper
-    if all_entries:
+    # Handle semantic search
+    if semantic:
+        try:
+            from paper_index_tool.vector import VectorSearcher
+            from paper_index_tool.vector.errors import IndexNotFoundError, VectorSearchError
+        except ImportError:
+            typer.echo(
+                "Error: Vector search dependencies not installed. "
+                "Install with: pip install paper-index-tool[vector] or uv sync --extra vector",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        try:
+            vector_searcher = VectorSearcher()
+            if not vector_searcher.index_exists():
+                typer.echo(
+                    "Error: Vector index not found. Build it first with: "
+                    "paper-index-tool reindex --vectors",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
+            results = vector_searcher.search(
+                query=search_query,
+                entry_id=paper_id or book_id,
+                top_k=num_results,
+                extract_fragments_flag=fragments,
+                context_lines=context,
+            )
+        except IndexNotFoundError:
+            typer.echo(
+                "Error: Vector index not found. Build it first with: "
+                "paper-index-tool reindex --vectors",
+                err=True,
+            )
+            raise typer.Exit(1)
+        except VectorSearchError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+
+    # Use CombinedSearcher for --all, PaperSearcher for single paper (BM25)
+    elif all_entries:
         from paper_index_tool.search import CombinedSearcher
 
         combined = CombinedSearcher()
@@ -3878,30 +3958,88 @@ def query_command(
 
 
 @app.command(name="reindex")
-def reindex_command() -> None:
-    """Rebuild the BM25 search index for all entries.
+def reindex_command(
+    vectors: Annotated[
+        bool, typer.Option("--vectors", help="Build vector index (requires AWS Bedrock)")
+    ] = False,
+    bm25_only: Annotated[
+        bool, typer.Option("--bm25", help="Only rebuild BM25 index (skip vectors)")
+    ] = False,
+) -> None:
+    """Rebuild search indices for all entries.
+
+    \b
+    INDEX TYPES:
+        (default)   Rebuild BM25 keyword search index only
+        --vectors   Build vector index for semantic search (requires AWS Bedrock)
+        --bm25      Explicitly only rebuild BM25 index
 
     \b
     USE CASES:
         - After manual edits to JSON files
         - If search results seem stale or incomplete
         - After bulk operations via scripts
+        - Before first semantic search (--vectors)
 
     \b
-    NOTE: The 'import' command automatically reindexes.
+    NOTE: The 'import' command automatically reindexes BM25.
 
     \b
-    EXAMPLE:
-        paper-index-tool reindex
+    EXAMPLES:
+        paper-index-tool reindex              # BM25 only
+        paper-index-tool reindex --vectors    # Build vector index (semantic search)
+
+    \b
+    REQUIREMENTS FOR --vectors:
+        - AWS credentials configured (AWS_PROFILE or environment variables)
+        - Bedrock access enabled for amazon.titan-embed-text-v2:0
+        - Optional dependencies: pip install paper-index-tool[vector]
     """
     from paper_index_tool.search import CombinedSearcher
 
-    logger.info("Rebuilding search indices")
-    searcher = CombinedSearcher()
-    counts = searcher.rebuild_all_indices()
-    typer.echo(
-        f"Indexed {counts['papers']} papers, {counts['books']} books, {counts['media']} media"
-    )
+    # Build BM25 index (unless --vectors only was intended)
+    if not vectors or bm25_only:
+        logger.info("Rebuilding BM25 search indices")
+        searcher = CombinedSearcher()
+        counts = searcher.rebuild_all_indices()
+        typer.echo(
+            f"BM25: Indexed {counts['papers']} papers, "
+            f"{counts['books']} books, {counts['media']} media"
+        )
+
+    # Build vector index if requested
+    if vectors:
+        try:
+            from paper_index_tool.vector import VectorSearcher
+            from paper_index_tool.vector.errors import AWSCredentialsError, EmbeddingError
+        except ImportError:
+            typer.echo(
+                "Error: Vector search dependencies not installed. "
+                "Install with: pip install paper-index-tool[vector] or uv sync --extra vector",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        typer.echo("Building vector index for semantic search...")
+        typer.echo("This requires AWS Bedrock access and may take a few minutes.")
+
+        try:
+            vector_searcher = VectorSearcher()
+            vector_counts = vector_searcher.rebuild_index()
+            typer.echo(
+                f"Vector: Indexed {vector_counts['papers']} papers, "
+                f"{vector_counts['books']} books, {vector_counts['media']} media "
+                f"({vector_counts['chunks']} chunks)"
+            )
+        except AWSCredentialsError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        except EmbeddingError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        except Exception as e:
+            typer.echo(f"Error building vector index: {e}", err=True)
+            raise typer.Exit(1)
 
 
 # =============================================================================

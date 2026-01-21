@@ -1,0 +1,355 @@
+"""Vector search using FAISS and Bedrock embeddings.
+
+This module provides semantic search capabilities using AWS Bedrock
+embeddings and FAISS vector index. It enables natural language queries
+that match on meaning rather than keywords.
+
+Classes:
+    VectorSearcher: Semantic search across papers, books, and media.
+
+The VectorSearcher follows the same interface as BM25 searchers but
+uses embedding-based similarity instead of keyword matching.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from paper_index_tool.logging_config import get_logger
+from paper_index_tool.models import Book, Media, Paper
+from paper_index_tool.search import EntryType, SearchResult, extract_fragments
+from paper_index_tool.storage import (
+    BookRegistry,
+    MediaRegistry,
+    PaperRegistry,
+    get_chunks_path,
+    get_faiss_index_path,
+    get_vector_index_dir,
+)
+from paper_index_tool.vector.chunking import Chunk, TextChunker
+from paper_index_tool.vector.embeddings import BedrockEmbeddings
+from paper_index_tool.vector.errors import IndexNotFoundError
+
+logger = get_logger(__name__)
+
+
+class VectorSearcher:
+    """Semantic search using FAISS and Bedrock embeddings.
+
+    Provides semantic search capabilities across papers, books, and media.
+    Uses AWS Bedrock Titan v2 for embeddings and FAISS for vector similarity.
+
+    Unlike BM25 search which matches keywords, semantic search matches
+    on meaning - enabling natural language queries like questions.
+
+    Attributes:
+        embeddings: BedrockEmbeddings client.
+        chunker: TextChunker for splitting documents.
+        paper_registry: Registry for papers.
+        book_registry: Registry for books.
+        media_registry: Registry for media.
+
+    Example:
+        >>> searcher = VectorSearcher()
+        >>> searcher.rebuild_index()
+        >>> results = searcher.search("How do leaders develop?", top_k=5)
+        >>> for r in results:
+        ...     print(f"{r.entry_id}: {r.score:.2f}")
+    """
+
+    def __init__(self) -> None:
+        """Initialize vector searcher.
+
+        Creates embeddings client, chunker, and registry instances.
+        Does not load the FAISS index until needed.
+        """
+        self.embeddings = BedrockEmbeddings()
+        self.chunker = TextChunker()
+        self.paper_registry = PaperRegistry()
+        self.book_registry = BookRegistry()
+        self.media_registry = MediaRegistry()
+        self._index: Any = None  # FAISS index
+        self._chunks: list[Chunk] = []
+
+    def _get_faiss(self) -> Any:
+        """Import and return faiss module.
+
+        Returns:
+            The faiss module.
+
+        Raises:
+            ImportError: If faiss-cpu is not installed.
+        """
+        try:
+            import faiss
+
+            return faiss
+        except ImportError:
+            raise ImportError(
+                "faiss-cpu is required for vector search. "
+                "Install with: pip install paper-index-tool[vector] "
+                "or: uv sync --extra vector"
+            )
+
+    def _get_numpy(self) -> Any:
+        """Import and return numpy module.
+
+        Returns:
+            The numpy module.
+
+        Raises:
+            ImportError: If numpy is not installed.
+        """
+        try:
+            import numpy as np
+
+            return np
+        except ImportError:
+            raise ImportError(
+                "numpy is required for vector search. "
+                "Install with: pip install paper-index-tool[vector] "
+                "or: uv sync --extra vector"
+            )
+
+    def rebuild_index(self) -> dict[str, int]:
+        """Rebuild the vector index from all entries.
+
+        Chunks all papers, books, and media, generates embeddings
+        via Bedrock, and builds a FAISS index for similarity search.
+
+        Returns:
+            Dictionary with counts: {"papers": N, "books": M, "media": P, "chunks": C}.
+
+        Example:
+            >>> counts = searcher.rebuild_index()
+            >>> print(f"Indexed {counts['chunks']} chunks")
+        """
+        faiss = self._get_faiss()
+        logger.info("Rebuilding vector index")
+
+        # Collect all chunks
+        all_chunks: list[Chunk] = []
+        counts = {"papers": 0, "books": 0, "media": 0, "chunks": 0}
+
+        # Chunk papers
+        for paper in self.paper_registry.list_entries():
+            text = paper.get_searchable_text()
+            chunks = self.chunker.chunk_text(text, paper.id, "paper")
+            all_chunks.extend(chunks)
+            counts["papers"] += 1
+
+        # Chunk books
+        for book in self.book_registry.list_entries():
+            text = book.get_searchable_text()
+            chunks = self.chunker.chunk_text(text, book.id, "book")
+            all_chunks.extend(chunks)
+            counts["books"] += 1
+
+        # Chunk media
+        for media in self.media_registry.list_entries():
+            text = media.get_searchable_text()
+            chunks = self.chunker.chunk_text(text, media.id, "media")
+            all_chunks.extend(chunks)
+            counts["media"] += 1
+
+        if not all_chunks:
+            logger.warning("No content to index")
+            return counts
+
+        counts["chunks"] = len(all_chunks)
+        logger.info("Generating embeddings for %d chunks", len(all_chunks))
+
+        # Generate embeddings
+        texts = [chunk.text for chunk in all_chunks]
+        embeddings_list = self.embeddings.embed_texts(texts)
+
+        # Convert to numpy array
+        np = self._get_numpy()
+        embeddings_array = np.array(embeddings_list, dtype=np.float32)
+
+        # Build FAISS index (Inner Product for cosine similarity with normalized vectors)
+        dimension = embeddings_array.shape[1]
+        index = faiss.IndexFlatIP(dimension)
+
+        # Normalize vectors for cosine similarity
+        faiss.normalize_L2(embeddings_array)
+        index.add(embeddings_array)
+
+        # Save index
+        index_dir = get_vector_index_dir()
+        index_dir.mkdir(parents=True, exist_ok=True)
+
+        faiss.write_index(index, str(get_faiss_index_path()))
+
+        # Save chunk metadata
+        chunks_data = [chunk.to_dict() for chunk in all_chunks]
+        with open(get_chunks_path(), "w") as f:
+            json.dump(chunks_data, f, indent=2)
+
+        logger.info(
+            "Vector index built: %d papers, %d books, %d media, %d chunks",
+            counts["papers"],
+            counts["books"],
+            counts["media"],
+            counts["chunks"],
+        )
+
+        # Clear cache
+        self._index = None
+        self._chunks = []
+
+        return counts
+
+    def _load_index(self) -> tuple[Any, list[Chunk]]:
+        """Load FAISS index and chunk metadata.
+
+        Returns:
+            Tuple of (FAISS index, list of Chunks).
+
+        Raises:
+            IndexNotFoundError: If index doesn't exist.
+        """
+        if self._index is not None and self._chunks:
+            return self._index, self._chunks
+
+        faiss = self._get_faiss()
+        index_path = get_faiss_index_path()
+        chunks_path = get_chunks_path()
+
+        if not index_path.exists() or not chunks_path.exists():
+            raise IndexNotFoundError()
+
+        try:
+            self._index = faiss.read_index(str(index_path))
+
+            with open(chunks_path) as f:
+                chunks_data = json.load(f)
+            self._chunks = [Chunk.from_dict(d) for d in chunks_data]
+
+            logger.debug("Loaded vector index with %d chunks", len(self._chunks))
+            return self._index, self._chunks
+        except Exception as e:
+            raise IndexNotFoundError() from e
+
+    def search(
+        self,
+        query: str,
+        entry_id: str | None = None,
+        top_k: int = 10,
+        extract_fragments_flag: bool = False,
+        context_lines: int = 3,
+        entry_types: list[EntryType] | None = None,
+    ) -> list[SearchResult]:
+        """Search using semantic similarity.
+
+        Embeds the query and finds the most similar chunks using
+        cosine similarity. Results are aggregated by entry and
+        returned as SearchResult objects.
+
+        Args:
+            query: Natural language query (can be a full sentence/question).
+            entry_id: If provided, filter results to this entry only.
+            top_k: Number of results to return.
+            extract_fragments_flag: If True, extract matching text fragments.
+            context_lines: Context lines around matches in fragments.
+            entry_types: Optional list of entry types to search.
+
+        Returns:
+            List of SearchResult objects sorted by similarity score.
+
+        Example:
+            >>> results = searcher.search(
+            ...     "How do individuals develop as leaders?",
+            ...     top_k=5
+            ... )
+        """
+        logger.info("Semantic search for: %s", query[:100])
+
+        faiss = self._get_faiss()
+        np = self._get_numpy()
+        index, chunks = self._load_index()
+
+        # Embed query
+        query_embedding = self.embeddings.embed_text(query)
+        query_array = np.array([query_embedding], dtype=np.float32)
+        faiss.normalize_L2(query_array)
+
+        # Search index
+        # Get more results than needed since we'll aggregate by entry
+        search_k = min(top_k * 10, len(chunks))
+        distances, indices = index.search(query_array, search_k)
+
+        # Aggregate results by entry
+        entry_scores: dict[str, tuple[float, Chunk]] = {}
+
+        for i, idx in enumerate(indices[0]):
+            if idx < 0 or idx >= len(chunks):
+                continue
+
+            chunk = chunks[idx]
+            score = float(distances[0][i])
+
+            # Filter by entry_id if specified
+            if entry_id and chunk.entry_id != entry_id:
+                continue
+
+            # Filter by entry_type if specified
+            if entry_types:
+                chunk_type = EntryType(chunk.entry_type)
+                if chunk_type not in entry_types:
+                    continue
+
+            # Keep best score per entry
+            if chunk.entry_id not in entry_scores or score > entry_scores[chunk.entry_id][0]:
+                entry_scores[chunk.entry_id] = (score, chunk)
+
+        # Build results
+        results: list[SearchResult] = []
+        query_terms = query.split()  # For fragment extraction
+
+        for entry_id_key, (score, chunk) in sorted(
+            entry_scores.items(), key=lambda x: x[1][0], reverse=True
+        )[:top_k]:
+            # Get full entry
+            entry: Paper | Book | Media | None = None
+            entry_type = EntryType(chunk.entry_type)
+
+            if entry_type == EntryType.PAPER:
+                entry = self.paper_registry.get_paper(entry_id_key)
+            elif entry_type == EntryType.BOOK:
+                entry = self.book_registry.get_book(entry_id_key)
+            elif entry_type == EntryType.MEDIA:
+                entry = self.media_registry.get_media(entry_id_key)
+
+            # Get full content for fragments
+            content = entry.get_searchable_text() if entry else chunk.text
+
+            # Extract fragments if requested
+            fragments: list[dict[str, Any]] = []
+            if extract_fragments_flag:
+                fragments = extract_fragments(content, query_terms, context_lines, max_fragments=3)
+
+            # Create result
+            result = SearchResult(
+                entry_id=entry_id_key,
+                score=score,
+                content=content,
+                entry_type=entry_type,
+                paper=entry if isinstance(entry, Paper) else None,
+                book=entry if isinstance(entry, Book) else None,
+                media=entry if isinstance(entry, Media) else None,
+                fragments=fragments,
+            )
+            results.append(result)
+
+        logger.info("Found %d semantic results", len(results))
+        return results
+
+    def index_exists(self) -> bool:
+        """Check if vector index exists.
+
+        Returns:
+            True if index exists, False otherwise.
+        """
+        return get_faiss_index_path().exists() and get_chunks_path().exists()

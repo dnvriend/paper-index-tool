@@ -104,12 +104,61 @@ def get_bm25_index_dir() -> Path:
     return get_config_dir() / "bm25s"
 
 
+def get_vector_index_dir() -> Path:
+    """Get the directory for vector index files.
+
+    The vector index directory stores FAISS index files and chunk
+    metadata for semantic search across papers, books, and media.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/
+
+    Example:
+        >>> vector_dir = get_vector_index_dir()
+        >>> vector_dir.name
+        'vectors'
+    """
+    return get_config_dir() / "vectors"
+
+
+def get_chunks_path() -> Path:
+    """Get the path to the chunks metadata file.
+
+    The chunks file stores text chunks with their embeddings metadata
+    for vector search.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/chunks.json
+
+    Example:
+        >>> chunks_path = get_chunks_path()
+        >>> chunks_path.name
+        'chunks.json'
+    """
+    return get_vector_index_dir() / "chunks.json"
+
+
+def get_faiss_index_path() -> Path:
+    """Get the path to the FAISS index file.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/index.faiss
+
+    Example:
+        >>> faiss_path = get_faiss_index_path()
+        >>> faiss_path.name
+        'index.faiss'
+    """
+    return get_vector_index_dir() / "index.faiss"
+
+
 def ensure_config_dir() -> None:
     """Create configuration directories if they don't exist.
 
     Creates all required directories for paper-index-tool storage:
         - ~/.config/paper-index-tool/ (main config directory)
         - ~/.config/paper-index-tool/bm25s/ (search index directory)
+        - ~/.config/paper-index-tool/vectors/ (vector index directory)
 
     This function is idempotent and safe to call multiple times.
 
@@ -123,3 +172,6 @@ def ensure_config_dir() -> None:
 
     bm25_dir = get_bm25_index_dir()
     bm25_dir.mkdir(parents=True, exist_ok=True)
+
+    vector_dir = get_vector_index_dir()
+    vector_dir.mkdir(parents=True, exist_ok=True)
