@@ -21,6 +21,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "bm25s>=0.2.0",
     "PyStemmer>=2.0.0",
+    "tqdm>=4.66.0",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +55,7 @@ dev = [
     "pytest>=7.4.0",
     "bandit>=1.7.0",
     "pip-audit>=2.6.0",
+    "types-tqdm>=4.66.0",
 ]
 
 [tool.ruff]

@@ -3995,13 +3995,45 @@ def reindex_command(
         - Bedrock access enabled for amazon.titan-embed-text-v2:0
         - Optional dependencies: pip install paper-index-tool[vector]
     """
-    from paper_index_tool.search import CombinedSearcher
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from tqdm import tqdm
+
+    from paper_index_tool.search import (
+        BookSearcher,
+        MediaSearcher,
+        PaperSearcher,
+    )
+
+    def _rebuild_index(index_type: str) -> tuple[str, int]:
+        """Rebuild a single index type (worker function for parallel execution)."""
+        if index_type == "papers":
+            return ("papers", PaperSearcher().rebuild_index())
+        elif index_type == "books":
+            return ("books", BookSearcher().rebuild_index())
+        else:
+            return ("media", MediaSearcher().rebuild_index())
 
     # Build BM25 index (unless --vectors only was intended)
     if not vectors or bm25_only:
-        logger.info("Rebuilding BM25 search indices")
-        searcher = CombinedSearcher()
-        counts = searcher.rebuild_all_indices()
+        logger.info("Rebuilding BM25 search indices in parallel")
+        counts = {"papers": 0, "books": 0, "media": 0}
+        index_types = ["papers", "books", "media"]
+        num_workers = min(os.cpu_count() or 1, len(index_types))
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {
+                executor.submit(_rebuild_index, idx_type): idx_type for idx_type in index_types
+            }
+
+            with tqdm(total=len(futures), desc="BM25 indexing", unit="index") as pbar:
+                for future in as_completed(futures):
+                    name, count = future.result()
+                    counts[name] = count
+                    pbar.set_postfix(completed=name)
+                    pbar.update(1)
+
         typer.echo(
             f"BM25: Indexed {counts['papers']} papers, "
             f"{counts['books']} books, {counts['media']} media"
@@ -4021,15 +4053,17 @@ def reindex_command(
             raise typer.Exit(1)
 
         typer.echo("Building vector index for semantic search...")
-        typer.echo("This requires AWS Bedrock access and may take a few minutes.")
 
         try:
             vector_searcher = VectorSearcher()
             vector_counts = vector_searcher.rebuild_index()
             typer.echo(
-                f"Vector: Indexed {vector_counts['papers']} papers, "
-                f"{vector_counts['books']} books, {vector_counts['media']} media "
-                f"({vector_counts['chunks']} chunks)"
+                f"Vector: Indexed {int(vector_counts['papers'])} papers, "
+                f"{int(vector_counts['books'])} books, {int(vector_counts['media'])} media "
+                f"({int(vector_counts['chunks'])} chunks)"
+            )
+            typer.echo(
+                f"Tokens: {int(vector_counts['tokens']):,} | Cost: ${vector_counts['cost']:.6f}"
             )
         except AWSCredentialsError as e:
             typer.echo(f"Error: {e}", err=True)

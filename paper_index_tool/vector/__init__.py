@@ -7,6 +7,7 @@ meaning rather than keywords.
 Classes:
     VectorSearcher: Semantic search across papers, books, and media.
     BedrockEmbeddings: AWS Bedrock embedding client.
+    EmbeddingStats: Statistics from embedding generation (tokens, cost).
     TextChunker: Text chunking with page/section tracking.
     Chunk: A text chunk with metadata.
 
@@ -26,7 +27,7 @@ Note: This module requires the 'vector' optional dependencies:
 """
 
 from paper_index_tool.vector.chunking import Chunk, TextChunker
-from paper_index_tool.vector.embeddings import BedrockEmbeddings
+from paper_index_tool.vector.embeddings import BedrockEmbeddings, EmbeddingStats
 from paper_index_tool.vector.errors import (
     AWSCredentialsError,
     EmbeddingError,
@@ -39,6 +40,7 @@ __all__ = [
     # Classes
     "BedrockEmbeddings",
     "Chunk",
+    "EmbeddingStats",
     "TextChunker",
     "VectorSearcher",
     # Exceptions

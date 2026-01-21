@@ -112,25 +112,26 @@ class VectorSearcher:
                 "or: uv sync --extra vector"
             )
 
-    def rebuild_index(self) -> dict[str, int]:
+    def rebuild_index(self) -> dict[str, int | float]:
         """Rebuild the vector index from all entries.
 
         Chunks all papers, books, and media, generates embeddings
         via Bedrock, and builds a FAISS index for similarity search.
 
         Returns:
-            Dictionary with counts: {"papers": N, "books": M, "media": P, "chunks": C}.
+            Dictionary with counts and cost:
+            {"papers": N, "books": M, "media": P, "chunks": C, "tokens": T, "cost": $}.
 
         Example:
             >>> counts = searcher.rebuild_index()
-            >>> print(f"Indexed {counts['chunks']} chunks")
+            >>> print(f"Indexed {counts['chunks']} chunks, cost: ${counts['cost']:.6f}")
         """
         faiss = self._get_faiss()
         logger.info("Rebuilding vector index")
 
         # Collect all chunks
         all_chunks: list[Chunk] = []
-        counts = {"papers": 0, "books": 0, "media": 0, "chunks": 0}
+        counts: dict[str, int | float] = {"papers": 0, "books": 0, "media": 0, "chunks": 0}
 
         # Chunk papers
         for paper in self.paper_registry.list_entries():
@@ -155,6 +156,8 @@ class VectorSearcher:
 
         if not all_chunks:
             logger.warning("No content to index")
+            counts["tokens"] = 0
+            counts["cost"] = 0.0
             return counts
 
         counts["chunks"] = len(all_chunks)
@@ -162,7 +165,11 @@ class VectorSearcher:
 
         # Generate embeddings
         texts = [chunk.text for chunk in all_chunks]
-        embeddings_list = self.embeddings.embed_texts(texts)
+        embeddings_list, stats = self.embeddings.embed_texts(texts)
+
+        # Store token/cost stats
+        counts["tokens"] = stats.total_tokens
+        counts["cost"] = stats.total_cost
 
         # Convert to numpy array
         np = self._get_numpy()
@@ -188,11 +195,13 @@ class VectorSearcher:
             json.dump(chunks_data, f, indent=2)
 
         logger.info(
-            "Vector index built: %d papers, %d books, %d media, %d chunks",
+            "Vector index built: %d papers, %d books, %d media, %d chunks, %d tokens, $%.6f",
             counts["papers"],
             counts["books"],
             counts["media"],
             counts["chunks"],
+            counts["tokens"],
+            counts["cost"],
         )
 
         # Clear cache
