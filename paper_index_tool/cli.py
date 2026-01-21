@@ -303,6 +303,174 @@ def _get_book_or_exit(book_id: str) -> Book:
         raise typer.Exit(1)
 
 
+def _get_book_or_chapters_or_exit(book_id: str) -> Book | list[Book]:
+    """Get book by ID, or all chapters if basename given, or exit with error.
+
+    This function provides smart lookup:
+    1. First tries exact match for book_id
+    2. If not found and book_id has no ch<n> suffix, searches for chapters
+
+    Args:
+        book_id: Book ID or basename to look up.
+
+    Returns:
+        Single Book if exact match found, or list of Books if chapters found.
+
+    Raises:
+        typer.Exit: If nothing found.
+    """
+    registry = BookRegistry()
+    result = registry.get_book_or_chapters(book_id)
+
+    if result is None:
+        typer.echo(
+            f"Error: Book '{book_id}' not found. "
+            f"Use 'paper-index-tool book list' to see available books.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    return result
+
+
+def _merge_chapters_to_dict(chapters: list[Book], basename: str) -> dict[str, Any]:
+    """Merge multiple chapter Book objects into a single dict.
+
+    Fields are merged according to their type:
+    - Single value fields: taken from first chapter (id uses basename)
+    - Text content fields: concatenated with [chN] headers
+    - Comma-separated fields: joined with commas
+    - List fields (quotes): flattened/appended
+
+    Args:
+        chapters: List of Book objects (chapters) sorted by chapter number.
+        basename: The basename to use as the merged ID.
+
+    Returns:
+        Merged dictionary suitable for JSON output.
+    """
+    if not chapters:
+        return {}
+
+    first = chapters[0]
+
+    # Single value fields - take from first chapter
+    merged: dict[str, Any] = {
+        "id": basename,
+        "author": first.author,
+        "title": first.title,
+        "year": first.year,
+        "pages": first.pages,
+        "publisher": first.publisher,
+        "url": first.url,
+        "isbn": first.isbn,
+        "created_at": first.created_at.isoformat() if first.created_at else None,
+        "updated_at": first.updated_at.isoformat() if first.updated_at else None,
+        "ai_generated": first.ai_generated,
+        "ai_provider": first.ai_provider,
+        "ai_model": first.ai_model,
+    }
+
+    # Comma-separated fields
+    comma_fields = ["chapter", "file_path_pdf", "file_path_markdown", "keywords"]
+    for field in comma_fields:
+        values = [getattr(ch, field, "") or "" for ch in chapters]
+        # Filter empty values and join with comma
+        non_empty = [v for v in values if v]
+        merged[field] = ", ".join(non_empty)
+
+    # Text content fields - concat with [chN] headers
+    text_fields = [
+        "abstract",
+        "question",
+        "method",
+        "gaps",
+        "results",
+        "interpretation",
+        "claims",
+        "full_text",
+    ]
+    for field in text_fields:
+        parts = []
+        for ch in chapters:
+            value = getattr(ch, field, "") or ""
+            if value:
+                # Extract chapter number from ID (e.g., vogelgesang2023ch1 -> ch1)
+                ch_suffix = ch.id.replace(basename, "")
+                parts.append(f"[{ch_suffix}]\n{value}")
+        merged[field] = "\n\n".join(parts)
+
+    # Quotes - flatten all quotes from all chapters
+    all_quotes = []
+    for ch in chapters:
+        if ch.quotes:
+            for q in ch.quotes:
+                all_quotes.append(q.model_dump())
+    merged["quotes"] = all_quotes
+
+    return merged
+
+
+def _print_chapters_sequential(chapters: list[Book], output_format: OutputFormat) -> None:
+    """Print multiple chapters sequentially with separators.
+
+    Args:
+        chapters: List of Book objects (chapters) to print.
+        output_format: Output format (HUMAN or JSON).
+    """
+    if output_format == OutputFormat.JSON:
+        # For JSON, output as single merged object
+        basename = BookRegistry.get_basename(chapters[0].id) if chapters else "unknown"
+        merged = _merge_chapters_to_dict(chapters, basename)
+        typer.echo(json.dumps(merged, indent=2))
+    else:
+        total = len(chapters)
+        for i, chapter in enumerate(chapters, 1):
+            typer.echo(f"{'=' * 60}")
+            typer.echo(f"Chapter {i} of {total}: {chapter.id}")
+            typer.echo(f"{'=' * 60}")
+            _print_book_detail(chapter, OutputFormat.HUMAN)
+            if i < total:
+                typer.echo("")  # Blank line between chapters
+
+
+def _print_chapters_field(
+    chapters: list[Book],
+    field_name: str,
+    output_format: OutputFormat,
+) -> None:
+    """Print a field from multiple chapters with headers.
+
+    Args:
+        chapters: List of Book objects (chapters).
+        field_name: Field name to extract (e.g., 'abstract', 'quotes').
+        output_format: Output format (HUMAN or JSON).
+    """
+    if output_format == OutputFormat.JSON:
+        # Return merged single object for JSON
+        basename = BookRegistry.get_basename(chapters[0].id) if chapters else "unknown"
+        merged = _merge_chapters_to_dict(chapters, basename)
+        # Output only the requested field
+        typer.echo(json.dumps({"id": basename, field_name: merged.get(field_name)}, indent=2))
+    else:
+        has_any_content = False
+        for chapter in chapters:
+            value = getattr(chapter, field_name, None)
+            if value:
+                has_any_content = True
+                typer.echo(f"[{chapter.id}]")
+                if field_name == "quotes" and isinstance(value, list):
+                    for i, q in enumerate(value, 1):
+                        typer.echo(f'  [{i}] "{q.text}" (p. {q.page})')
+                else:
+                    typer.echo(value)
+                typer.echo("")  # Blank line between chapters
+
+        if not has_any_content:
+            basename = BookRegistry.get_basename(chapters[0].id) if chapters else "unknown"
+            typer.echo(f"No {field_name} set for any chapter in '{basename}'")
+
+
 # =============================================================================
 # Helper Functions - Media
 # =============================================================================
@@ -1341,21 +1509,34 @@ def book_create(
 
 @book_app.command(name="show")
 def book_show(
-    book_id: Annotated[str, typer.Argument(help="Book ID to show")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename to show")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show details of a book.
+    """Show details of a book or all chapters if basename given.
+
+    \b
+    If book_id matches an exact entry, shows that book.
+    If book_id is a basename (no ch<n> suffix) and chapters exist,
+    shows all chapters sequentially.
 
     \b
     Examples:
-        paper-index-tool book show vogelgesang2023
+        paper-index-tool book show vogelgesang2023ch1    # Single chapter
+        paper-index-tool book show vogelgesang2023       # All chapters
         paper-index-tool book show vogelgesang2023 --format json
     """
     logger.info("Showing book: %s", book_id)
-    book = _get_book_or_exit(book_id)
-    _print_book_detail(book, output_format)
+    result = _get_book_or_chapters_or_exit(book_id)
+
+    if isinstance(result, list):
+        # Multiple chapters found
+        logger.info("Found %d chapters for basename '%s'", len(result), book_id)
+        _print_chapters_sequential(result, output_format)
+    else:
+        # Single book
+        _print_book_detail(result, output_format)
 
 
 @book_app.command(name="update")
@@ -1490,47 +1671,92 @@ def book_update(
 
 @book_app.command(name="delete")
 def book_delete(
-    book_id: Annotated[str, typer.Argument(help="Book ID to delete")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename to delete")],
     force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Delete a book.
+    """Delete a book or all chapters if basename given.
+
+    \b
+    If book_id matches an exact entry, deletes that book.
+    If book_id is a basename (no ch<n> suffix) and chapters exist,
+    deletes all chapters with one confirmation.
 
     \b
     Examples:
-        paper-index-tool book delete vogelgesang2023
+        paper-index-tool book delete vogelgesang2023ch1    # Single chapter
+        paper-index-tool book delete vogelgesang2023       # All chapters
         paper-index-tool book delete vogelgesang2023 --force
     """
     logger.info("Deleting book: %s", book_id)
 
     registry = BookRegistry()
 
-    if not registry.book_exists(book_id):
-        typer.echo(
-            f"Error: Book '{book_id}' not found. "
-            f"Use 'paper-index-tool book list' to see available books.",
-            err=True,
-        )
-        raise typer.Exit(1)
+    # Check if exact match exists
+    if registry.book_exists(book_id):
+        # Single book delete
+        if not force:
+            confirm = typer.confirm(f"Delete book '{book_id}'?")
+            if not confirm:
+                typer.echo("Cancelled")
+                raise typer.Exit(0)
 
-    if not force:
-        confirm = typer.confirm(f"Delete book '{book_id}'?")
-        if not confirm:
-            typer.echo("Cancelled")
-            raise typer.Exit(0)
+        try:
+            registry.delete_book(book_id)
+        except EntryNotFoundError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
 
-    try:
-        registry.delete_book(book_id)
-    except EntryNotFoundError as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
+        if output_format == OutputFormat.JSON:
+            typer.echo(json.dumps({"status": "deleted", "id": book_id}))
+        else:
+            typer.echo(f"Deleted book: {book_id}")
+        return
 
-    if output_format == OutputFormat.JSON:
-        typer.echo(json.dumps({"status": "deleted", "id": book_id}))
-    else:
-        typer.echo(f"Deleted book: {book_id}")
+    # Check if basename with chapters
+    if not registry.is_chapter_id(book_id):
+        chapters = registry.find_chapters(book_id)
+        if chapters:
+            chapter_ids = [c.id for c in chapters]
+            if not force:
+                typer.echo(f"Found {len(chapters)} chapters for '{book_id}':")
+                for cid in chapter_ids:
+                    typer.echo(f"  - {cid}")
+                confirm = typer.confirm(f"Delete all {len(chapters)} chapters?")
+                if not confirm:
+                    typer.echo("Cancelled")
+                    raise typer.Exit(0)
+
+            try:
+                count = registry.delete_chapters(book_id)
+            except EntryNotFoundError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
+
+            if output_format == OutputFormat.JSON:
+                typer.echo(
+                    json.dumps(
+                        {
+                            "status": "deleted",
+                            "basename": book_id,
+                            "count": count,
+                            "ids": chapter_ids,
+                        }
+                    )
+                )
+            else:
+                typer.echo(f"Deleted {count} chapters for '{book_id}'")
+            return
+
+    # Not found
+    typer.echo(
+        f"Error: Book '{book_id}' not found. "
+        f"Use 'paper-index-tool book list' to see available books.",
+        err=True,
+    )
+    raise typer.Exit(1)
 
 
 @book_app.command(name="list")
@@ -1634,131 +1860,160 @@ def book_clear(
 # Book field query commands
 @book_app.command(name="abstract")
 def book_abstract(
-    book_id: Annotated[str, typer.Argument(help="Book ID")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show book abstract.
+    """Show book abstract or all chapter abstracts if basename given.
 
     \b
     Examples:
-        paper-index-tool book abstract vogelgesang2023
+        paper-index-tool book abstract vogelgesang2023ch1  # Single chapter
+        paper-index-tool book abstract vogelgesang2023     # All chapters
     """
-    book = _get_book_or_exit(book_id)
-    _print_field(book_id, "abstract", book.abstract, output_format)
+    result = _get_book_or_chapters_or_exit(book_id)
+    if isinstance(result, list):
+        _print_chapters_field(result, "abstract", output_format)
+    else:
+        _print_field(book_id, "abstract", result.abstract, output_format)
 
 
 @book_app.command(name="question")
 def book_question(
-    book_id: Annotated[str, typer.Argument(help="Book ID")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show main question/thesis.
+    """Show main question/thesis or all chapter questions if basename given.
 
     \b
     Examples:
-        paper-index-tool book question vogelgesang2023
+        paper-index-tool book question vogelgesang2023ch1  # Single chapter
+        paper-index-tool book question vogelgesang2023     # All chapters
     """
-    book = _get_book_or_exit(book_id)
-    _print_field(book_id, "question", book.question, output_format)
+    result = _get_book_or_chapters_or_exit(book_id)
+    if isinstance(result, list):
+        _print_chapters_field(result, "question", output_format)
+    else:
+        _print_field(book_id, "question", result.question, output_format)
 
 
 @book_app.command(name="method")
 def book_method(
-    book_id: Annotated[str, typer.Argument(help="Book ID")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show methodology/approach.
+    """Show methodology/approach or all chapter methods if basename given.
 
     \b
     Examples:
-        paper-index-tool book method vogelgesang2023
+        paper-index-tool book method vogelgesang2023ch1  # Single chapter
+        paper-index-tool book method vogelgesang2023     # All chapters
     """
-    book = _get_book_or_exit(book_id)
-    _print_field(book_id, "method", book.method, output_format)
+    result = _get_book_or_chapters_or_exit(book_id)
+    if isinstance(result, list):
+        _print_chapters_field(result, "method", output_format)
+    else:
+        _print_field(book_id, "method", result.method, output_format)
 
 
 @book_app.command(name="gaps")
 def book_gaps(
-    book_id: Annotated[str, typer.Argument(help="Book ID")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show identified gaps.
+    """Show identified gaps or all chapter gaps if basename given.
 
     \b
     Examples:
-        paper-index-tool book gaps vogelgesang2023
+        paper-index-tool book gaps vogelgesang2023ch1  # Single chapter
+        paper-index-tool book gaps vogelgesang2023     # All chapters
     """
-    book = _get_book_or_exit(book_id)
-    _print_field(book_id, "gaps", book.gaps, output_format)
+    result = _get_book_or_chapters_or_exit(book_id)
+    if isinstance(result, list):
+        _print_chapters_field(result, "gaps", output_format)
+    else:
+        _print_field(book_id, "gaps", result.gaps, output_format)
 
 
 @book_app.command(name="results")
 def book_results(
-    book_id: Annotated[str, typer.Argument(help="Book ID")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show key results.
+    """Show key results or all chapter results if basename given.
 
     \b
     Examples:
-        paper-index-tool book results vogelgesang2023
+        paper-index-tool book results vogelgesang2023ch1  # Single chapter
+        paper-index-tool book results vogelgesang2023     # All chapters
     """
-    book = _get_book_or_exit(book_id)
-    _print_field(book_id, "results", book.results, output_format)
+    result = _get_book_or_chapters_or_exit(book_id)
+    if isinstance(result, list):
+        _print_chapters_field(result, "results", output_format)
+    else:
+        _print_field(book_id, "results", result.results, output_format)
 
 
 @book_app.command(name="claims")
 def book_claims(
-    book_id: Annotated[str, typer.Argument(help="Book ID")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show key claims.
+    """Show key claims or all chapter claims if basename given.
 
     \b
     Examples:
-        paper-index-tool book claims vogelgesang2023
+        paper-index-tool book claims vogelgesang2023ch1  # Single chapter
+        paper-index-tool book claims vogelgesang2023     # All chapters
     """
-    book = _get_book_or_exit(book_id)
-    _print_field(book_id, "claims", book.claims, output_format)
+    result = _get_book_or_chapters_or_exit(book_id)
+    if isinstance(result, list):
+        _print_chapters_field(result, "claims", output_format)
+    else:
+        _print_field(book_id, "claims", result.claims, output_format)
 
 
 @book_app.command(name="quotes")
 def book_quotes(
-    book_id: Annotated[str, typer.Argument(help="Book ID")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename")],
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Show stored quotes with page references.
+    """Show stored quotes with page references or all chapter quotes if basename given.
 
     \b
     Examples:
-        paper-index-tool book quotes vogelgesang2023
+        paper-index-tool book quotes vogelgesang2023ch1  # Single chapter
+        paper-index-tool book quotes vogelgesang2023     # All chapters
     """
-    book = _get_book_or_exit(book_id)
+    result = _get_book_or_chapters_or_exit(book_id)
 
-    if output_format == OutputFormat.JSON:
-        quotes_data = [q.model_dump() for q in book.quotes]
-        typer.echo(json.dumps({"quotes": quotes_data, "id": book_id}))
+    if isinstance(result, list):
+        _print_chapters_field(result, "quotes", output_format)
     else:
-        if not book.quotes:
-            typer.echo(f"No quotes stored for book '{book_id}'")
-            return
+        book = result
+        if output_format == OutputFormat.JSON:
+            quotes_data = [q.model_dump() for q in book.quotes]
+            typer.echo(json.dumps({"quotes": quotes_data, "id": book_id}))
+        else:
+            if not book.quotes:
+                typer.echo(f"No quotes stored for book '{book_id}'")
+                return
 
-        for i, q in enumerate(book.quotes, 1):
-            typer.echo(f'[{i}] "{q.text}" (p. {q.page})')
+            for i, q in enumerate(book.quotes, 1):
+                typer.echo(f'[{i}] "{q.text}" (p. {q.page})')
 
 
 @book_app.command(name="file-path-pdf")
@@ -1811,7 +2066,7 @@ def book_bibtex(
 
 @book_app.command(name="query")
 def book_query(
-    book_id: Annotated[str, typer.Argument(help="Book ID to search")],
+    book_id: Annotated[str, typer.Argument(help="Book ID or basename to search")],
     search_query: Annotated[str, typer.Argument(help="Search query string")],
     fragments: Annotated[
         bool, typer.Option("--fragments", help="Show matching text fragments")
@@ -1822,27 +2077,105 @@ def book_query(
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
 ) -> None:
-    """Search within a single book using BM25.
+    """Search within a book or all chapters if basename given.
 
     \b
-    Convenience command equivalent to: query "terms" --book <id>
+    If book_id matches an exact entry, searches that book.
+    If book_id is a basename (no ch<n> suffix) and chapters exist,
+    searches all chapters and returns union of results with chapter ID prefixes.
 
     \b
     Examples:
-        paper-index-tool book query vogelgesang2023 "leadership identity"
-        paper-index-tool book query vogelgesang2023 "organizational behavior" --fragments
+        paper-index-tool book query vogelgesang2023ch1 "leadership"  # Single chapter
+        paper-index-tool book query vogelgesang2023 "leadership"     # All chapters
+        paper-index-tool book query vogelgesang2023 "identity" --fragments
     """
-    # Delegate to main query command
-    query_command(
-        search_query=search_query,
-        paper_id=None,
-        book_id=book_id,
-        all_entries=False,
-        fragments=fragments,
-        context=context,
-        num_results=num_results,
-        output_format=output_format,
-    )
+    import bm25s  # type: ignore[import-untyped]
+    import Stemmer  # type: ignore[import-not-found]
+
+    from paper_index_tool.search import extract_fragments
+
+    logger.info("Query: %s in book: %s", search_query, book_id)
+
+    result = _get_book_or_chapters_or_exit(book_id)
+
+    # If single book, delegate to query_command
+    if isinstance(result, Book):
+        query_command(
+            search_query=search_query,
+            paper_id=None,
+            book_id=book_id,
+            all_entries=False,
+            fragments=fragments,
+            context=context,
+            num_results=num_results,
+            output_format=output_format,
+        )
+        return
+
+    # Multiple chapters - search each and union results
+    chapters = result
+    logger.info("Searching %d chapters for basename '%s'", len(chapters), book_id)
+
+    all_results: list[dict[str, Any]] = []
+    stemmer = Stemmer.Stemmer("english")
+    query_terms = search_query.split()
+
+    for chapter in chapters:
+        content = chapter.get_searchable_text()
+        if not content:
+            continue
+
+        # BM25 scoring for this chapter
+        corpus_tokens = bm25s.tokenize([content], stopwords="en", stemmer=stemmer)
+        query_tokens = bm25s.tokenize([search_query], stopwords="en", stemmer=stemmer)
+
+        retriever = bm25s.BM25()
+        retriever.index(corpus_tokens)
+        _results_array, scores_array = retriever.retrieve(query_tokens, k=1)
+
+        score = float(scores_array[0, 0])
+        if score <= 0:
+            continue
+
+        # Extract fragments if requested
+        frags = []
+        if fragments:
+            frags = extract_fragments(content, query_terms, context, max_fragments=3)
+
+        chapter_result: dict[str, Any] = {
+            "id": chapter.id,
+            "type": "book",
+            "score": score,
+            "title": chapter.title or "",
+        }
+        if fragments and frags:
+            chapter_result["fragments"] = frags
+
+        all_results.append(chapter_result)
+
+    # Sort by score descending and limit
+    all_results.sort(key=lambda x: x["score"], reverse=True)
+    all_results = all_results[:num_results]
+
+    # Output
+    if not all_results:
+        if output_format == OutputFormat.JSON:
+            typer.echo(json.dumps([]))
+        else:
+            typer.echo("No results found")
+        return
+
+    if output_format == OutputFormat.JSON:
+        typer.echo(json.dumps(all_results, indent=2))
+    else:
+        for r in all_results:
+            typer.echo(f"[{r['id']}] score={r['score']:.3f} - {r['title']}")
+            if fragments and "fragments" in r:
+                for frag in r["fragments"]:
+                    typer.echo(f"  Lines {frag['line_start']}-{frag['line_end']}:")
+                    typer.echo(f"    {frag['text'][:200]}...")
+                typer.echo("")
 
 
 # =============================================================================
@@ -2601,8 +2934,8 @@ def media_query(
         return
 
     # Use BM25 for scoring
-    import bm25s  # type: ignore[import-untyped]
-    import Stemmer  # type: ignore[import-not-found]
+    import bm25s
+    import Stemmer
 
     from paper_index_tool.search import extract_fragments
 

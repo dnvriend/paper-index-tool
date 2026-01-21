@@ -18,6 +18,7 @@ and has been reviewed and tested by a human.
 """
 
 import json
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -902,6 +903,158 @@ class BookRegistry(BaseRegistry[Book]):
             True if book exists, False otherwise.
         """
         return self.entry_exists(book_id)
+
+    # =========================================================================
+    # Chapter Grouping Methods
+    # =========================================================================
+
+    @staticmethod
+    def is_chapter_id(entry_id: str) -> bool:
+        """Check if an ID has a ch<n> suffix indicating a chapter.
+
+        Args:
+            entry_id: The book ID to check.
+
+        Returns:
+            True if the ID ends with ch followed by digits (e.g., vogelgesang2023ch1).
+
+        Example:
+            >>> BookRegistry.is_chapter_id("vogelgesang2023ch1")
+            True
+            >>> BookRegistry.is_chapter_id("vogelgesang2023")
+            False
+        """
+        return bool(re.search(r"ch\d+$", entry_id))
+
+    @staticmethod
+    def get_basename(entry_id: str) -> str:
+        """Extract the basename from a chapter ID.
+
+        Removes the ch<n> suffix to get the base book identifier.
+
+        Args:
+            entry_id: The chapter ID (e.g., vogelgesang2023ch1).
+
+        Returns:
+            The basename without chapter suffix (e.g., vogelgesang2023).
+
+        Example:
+            >>> BookRegistry.get_basename("vogelgesang2023ch1")
+            'vogelgesang2023'
+            >>> BookRegistry.get_basename("vogelgesang2023")
+            'vogelgesang2023'
+        """
+        return re.sub(r"ch\d+$", "", entry_id)
+
+    def find_chapters(self, basename: str) -> list[Book]:
+        """Find all chapters matching a basename, sorted by chapter number.
+
+        Searches for all books with IDs matching the pattern <basename>ch<n>
+        and returns them sorted by chapter number.
+
+        Args:
+            basename: The base book ID without chapter suffix.
+
+        Returns:
+            List of Book objects sorted by chapter number.
+            Empty list if no chapters found.
+
+        Example:
+            >>> chapters = registry.find_chapters("vogelgesang2023")
+            >>> [c.id for c in chapters]
+            ['vogelgesang2023ch1', 'vogelgesang2023ch2', ..., 'vogelgesang2023ch11']
+        """
+        pattern = re.compile(rf"^{re.escape(basename)}ch(\d+)$")
+        chapters: list[tuple[int, Book]] = []
+        for book in self.list_books():
+            match = pattern.match(book.id)
+            if match:
+                chapter_num = int(match.group(1))
+                chapters.append((chapter_num, book))
+        sorted_chapters = sorted(chapters, key=lambda x: x[0])
+        result = [book for _, book in sorted_chapters]
+        logger.debug(
+            "Found %d chapters for basename '%s'",
+            len(result),
+            basename,
+        )
+        return result
+
+    def get_book_or_chapters(self, book_id: str) -> Book | list[Book] | None:
+        """Get a single book or all chapters if basename given.
+
+        This method provides smart lookup:
+        1. First tries exact match for book_id
+        2. If not found and book_id has no ch<n> suffix, searches for chapters
+
+        Args:
+            book_id: Book ID or basename to look up.
+
+        Returns:
+            - Single Book if exact match found
+            - List of Books if chapters found for basename
+            - None if nothing found
+
+        Example:
+            >>> # Exact match returns single book
+            >>> result = registry.get_book_or_chapters("vogelgesang2023ch1")
+            >>> isinstance(result, Book)
+            True
+
+            >>> # Basename returns list of chapters
+            >>> result = registry.get_book_or_chapters("vogelgesang2023")
+            >>> isinstance(result, list)
+            True
+        """
+        # First try exact match
+        book = self.get_book(book_id)
+        if book is not None:
+            return book
+
+        # If not found and no ch<n> suffix, look for chapters
+        if not self.is_chapter_id(book_id):
+            chapters = self.find_chapters(book_id)
+            if chapters:
+                logger.info(
+                    "Found %d chapters for basename '%s'",
+                    len(chapters),
+                    book_id,
+                )
+                return chapters
+
+        return None
+
+    def delete_chapters(self, basename: str) -> int:
+        """Delete all chapters matching a basename.
+
+        Args:
+            basename: The base book ID without chapter suffix.
+
+        Returns:
+            Number of chapters deleted.
+
+        Raises:
+            EntryNotFoundError: If no chapters found for basename.
+
+        Example:
+            >>> count = registry.delete_chapters("vogelgesang2023")
+            >>> print(f"Deleted {count} chapters")
+            Deleted 11 chapters
+        """
+        chapters = self.find_chapters(basename)
+        if not chapters:
+            raise EntryNotFoundError("book", basename)
+
+        for chapter in chapters:
+            self.delete_book(chapter.id)
+            logger.info("Deleted chapter '%s'", chapter.id)
+
+        logger.info(
+            "Deleted %d chapters for basename '%s'",
+            len(chapters),
+            basename,
+        )
+        return len(chapters)
 
 
 class MediaRegistry(BaseRegistry[Media]):
