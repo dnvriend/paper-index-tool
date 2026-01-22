@@ -139,7 +139,7 @@ def get_chunks_path() -> Path:
 
 
 def get_faiss_index_path() -> Path:
-    """Get the path to the FAISS index file.
+    """Get the path to the FAISS index file (legacy single-index).
 
     Returns:
         Path to ~/.config/paper-index-tool/vectors/index.faiss
@@ -150,6 +150,96 @@ def get_faiss_index_path() -> Path:
         'index.faiss'
     """
     return get_vector_index_dir() / "index.faiss"
+
+
+def get_named_index_dir(name: str) -> Path:
+    """Get the directory for a named vector index.
+
+    Each named index has its own directory containing the FAISS index,
+    chunks metadata, and index configuration.
+
+    Args:
+        name: Index name (e.g., "nova-1024", "titan-v2").
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/<name>/
+
+    Example:
+        >>> index_dir = get_named_index_dir("nova-1024")
+        >>> index_dir.name
+        'nova-1024'
+    """
+    return get_vector_index_dir() / name
+
+
+def get_named_index_faiss_path(name: str) -> Path:
+    """Get the FAISS index file path for a named index.
+
+    Args:
+        name: Index name.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/<name>/index.faiss
+    """
+    return get_named_index_dir(name) / "index.faiss"
+
+
+def get_named_index_chunks_path(name: str) -> Path:
+    """Get the chunks metadata file path for a named index.
+
+    Args:
+        name: Index name.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/<name>/chunks.json
+    """
+    return get_named_index_dir(name) / "chunks.json"
+
+
+def get_named_index_metadata_path(name: str) -> Path:
+    """Get the metadata file path for a named index.
+
+    Args:
+        name: Index name.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/<name>/metadata.json
+    """
+    return get_named_index_dir(name) / "metadata.json"
+
+
+def get_vector_indices_path() -> Path:
+    """Get the path to the vector indices registry file.
+
+    The indices registry tracks all named vector indices and their
+    configurations.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/vectors/indices.json
+
+    Example:
+        >>> indices_path = get_vector_indices_path()
+        >>> indices_path.name
+        'indices.json'
+    """
+    return get_vector_index_dir() / "indices.json"
+
+
+def get_settings_path() -> Path:
+    """Get the path to the global settings file.
+
+    The settings file stores user preferences like the default
+    vector index for semantic search.
+
+    Returns:
+        Path to ~/.config/paper-index-tool/settings.json
+
+    Example:
+        >>> settings_path = get_settings_path()
+        >>> settings_path.name
+        'settings.json'
+    """
+    return get_config_dir() / "settings.json"
 
 
 def ensure_config_dir() -> None:

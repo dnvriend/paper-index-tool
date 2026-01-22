@@ -38,8 +38,14 @@ from paper_index_tool.storage.paths import (
     get_config_dir,
     get_faiss_index_path,
     get_media_path,
+    get_named_index_chunks_path,
+    get_named_index_dir,
+    get_named_index_faiss_path,
+    get_named_index_metadata_path,
     get_papers_path,
+    get_settings_path,
     get_vector_index_dir,
+    get_vector_indices_path,
 )
 from paper_index_tool.storage.registry import (
     BaseRegistry,
@@ -71,6 +77,12 @@ __all__ = [
     "get_config_dir",
     "get_faiss_index_path",
     "get_media_path",
+    "get_named_index_chunks_path",
+    "get_named_index_dir",
+    "get_named_index_faiss_path",
+    "get_named_index_metadata_path",
     "get_papers_path",
+    "get_settings_path",
     "get_vector_index_dir",
+    "get_vector_indices_path",
 ]

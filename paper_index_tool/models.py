@@ -1468,3 +1468,93 @@ MEDIA_ALL_FIELDS = MEDIA_BIBTEX_FIELDS + MEDIA_CONTENT_FIELDS
 BIBTEX_FIELDS = PAPER_BIBTEX_FIELDS
 CONTENT_FIELDS = PAPER_CONTENT_FIELDS
 ALL_FIELDS = PAPER_ALL_FIELDS
+
+
+# =============================================================================
+# Vector Index Metadata Model
+# =============================================================================
+
+
+class VectorIndexMetadata(BaseModel):
+    """Metadata for a named vector index.
+
+    Each vector index stores embeddings for semantic search with a specific
+    embedding model and configuration. This metadata tracks the index
+    configuration and statistics.
+
+    Attributes:
+        name: Unique index name (e.g., "nova-1024", "titan-v2").
+        embedding_model: Model ID for generating embeddings.
+        dimensions: Vector dimensions (model-dependent).
+        chunk_size: Number of words per chunk.
+        chunk_overlap: Overlap words between chunks.
+        chunk_count: Total chunks in the index.
+        total_tokens: Total tokens processed.
+        estimated_cost_usd: Estimated embedding cost.
+        created_at: Index creation timestamp.
+        updated_at: Last update timestamp.
+
+    Example:
+        >>> metadata = VectorIndexMetadata(
+        ...     name="nova-1024",
+        ...     embedding_model="amazon.nova-2-multimodal-embeddings-v1:0",
+        ...     dimensions=1024,
+        ... )
+    """
+
+    name: str = Field(description="Unique index name (e.g., 'nova-1024', 'titan-v2')")
+    embedding_model: str = Field(description="AWS Bedrock model ID for embeddings")
+    dimensions: int = Field(description="Vector dimensions for this index")
+    chunk_size: int = Field(default=300, description="Number of words per chunk")
+    chunk_overlap: int = Field(default=50, description="Overlap words between chunks")
+    chunk_count: int = Field(default=0, description="Total number of chunks in index")
+    total_tokens: int = Field(default=0, description="Total tokens processed")
+    estimated_cost_usd: float = Field(default=0.0, description="Estimated embedding cost in USD")
+    created_at: datetime = Field(default_factory=datetime.now, description="When index was created")
+    updated_at: datetime = Field(
+        default_factory=datetime.now, description="When index was last updated"
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """Validate index name format (alphanumeric, hyphens, underscores)."""
+        pattern = r"^[a-z0-9][a-z0-9_-]*$"
+        if not re.match(pattern, v):
+            raise ValueError(
+                f"Invalid index name: '{v}'. "
+                f"Name must start with letter/digit and contain only "
+                f"lowercase letters, digits, hyphens, and underscores."
+            )
+        return v
+
+    @field_validator("dimensions")
+    @classmethod
+    def validate_dimensions(cls, v: int) -> int:
+        """Validate dimensions is a positive integer."""
+        if v <= 0:
+            raise ValueError(f"Dimensions must be positive, got {v}.")
+        return v
+
+
+# =============================================================================
+# Settings Model
+# =============================================================================
+
+
+class Settings(BaseModel):
+    """Global settings for paper-index-tool.
+
+    Stores user preferences and default configurations that persist
+    across CLI sessions.
+
+    Attributes:
+        default_vector_index: Name of the default vector index for semantic search.
+
+    Example:
+        >>> settings = Settings(default_vector_index="nova-1024")
+    """
+
+    default_vector_index: str | None = Field(
+        default=None, description="Default vector index for semantic search"
+    )

@@ -97,3 +97,69 @@ class AWSCredentialsError(VectorSearchError):
             f"3) IAM role (if running on AWS). "
             f"Ensure the credentials have bedrock:InvokeModel permission."
         )
+
+
+class ModelMismatchError(VectorSearchError):
+    """Model mismatch between index and query.
+
+    Raised when attempting to query an index with a different embedding
+    model than was used to create it. Embeddings are not comparable
+    across different models.
+
+    Example:
+        >>> raise ModelMismatchError("nova-1024", "titan-v2")
+    """
+
+    def __init__(self, index_model: str, query_model: str) -> None:
+        """Initialize with model names.
+
+        Args:
+            index_model: Model used to create the index.
+            query_model: Model used for the query.
+        """
+        super().__init__(
+            f"Model mismatch: Index was created with '{index_model}' but "
+            f"query is using '{query_model}'. Embeddings from different models "
+            f"are not comparable. Use the same model or create a new index."
+        )
+
+
+class NamedIndexNotFoundError(VectorSearchError):
+    """Named vector index not found.
+
+    Raised when attempting to use a named index that doesn't exist.
+
+    Example:
+        >>> raise NamedIndexNotFoundError("nova-1024")
+    """
+
+    def __init__(self, index_name: str) -> None:
+        """Initialize with index name.
+
+        Args:
+            index_name: Name of the index that was not found.
+        """
+        super().__init__(
+            f"Vector index '{index_name}' not found. "
+            f"Create it with: paper-index-tool vector create {index_name} --model <model> "
+            f"List available indices with: paper-index-tool vector list"
+        )
+
+
+class ChunkingError(VectorSearchError):
+    """Error during text chunking.
+
+    Raised when chunking operations fail due to invalid parameters,
+    file read errors, or other chunking-related issues.
+
+    Example:
+        >>> raise ChunkingError("Chunk overlap must be less than chunk size")
+    """
+
+    def __init__(self, message: str) -> None:
+        """Initialize with descriptive message.
+
+        Args:
+            message: Description of the chunking error.
+        """
+        super().__init__(f"Chunking error: {message}")

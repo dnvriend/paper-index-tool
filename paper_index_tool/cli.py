@@ -55,6 +55,9 @@ book_app = typer.Typer(
 media_app = typer.Typer(
     help="Manage media (video, podcast, blog): create, read, update, delete, query fields"
 )
+vector_app = typer.Typer(
+    help="Manage vector indices for semantic search: create, list, info, delete, default"
+)
 
 
 class OutputFormat(str, Enum):
@@ -3709,6 +3712,9 @@ def query_command(
     semantic: Annotated[
         bool, typer.Option("--semantic", "-s", help="Semantic search (natural language)")
     ] = False,
+    index_name: Annotated[
+        str | None, typer.Option("--index", "-i", help="Named vector index for semantic search")
+    ] = None,
     fragments: Annotated[
         bool, typer.Option("--fragments", help="Include matching text fragments in output")
     ] = False,
@@ -3734,6 +3740,10 @@ def query_command(
         --semantic, -s  Semantic search - use natural language like "How do leaders develop?"
 
     \b
+    VECTOR INDEX (for semantic search):
+        --index <name>  Use a specific named vector index (default: settings default or legacy)
+
+    \b
     OUTPUT OPTIONS:
         --fragments     Show matching text snippets with context
         -C <n>          Context lines around match (default: 2)
@@ -3747,6 +3757,9 @@ def query_command(
 
         # Semantic search with natural language question
         paper-index-tool query "How do individuals develop as leaders?" --all -s
+
+        # Semantic search with specific index
+        paper-index-tool query "leadership development" --all -s --index nova-1024
 
         # Semantic search works across languages
         paper-index-tool query "Wat gebeurt er met leiderschap bij thuiswerken?" --all -s
@@ -3762,8 +3775,9 @@ def query_command(
         [{"id": "...", "type": "paper|book|media", "score": 0.85, "title": "..."}]
 
     \b
-    NOTE: Semantic search requires AWS Bedrock access. Build vector index first:
-        paper-index-tool reindex --vectors
+    NOTE: Semantic search requires AWS Bedrock access. Create a vector index first:
+        paper-index-tool vector create nova-1024 --model nova --dimensions 1024
+        paper-index-tool vector default nova-1024
     """
     from paper_index_tool.search import PaperSearcher
 
@@ -3853,8 +3867,13 @@ def query_command(
     # Handle semantic search
     if semantic:
         try:
+            from paper_index_tool.settings import get_default_vector_index
             from paper_index_tool.vector import VectorSearcher
-            from paper_index_tool.vector.errors import IndexNotFoundError, VectorSearchError
+            from paper_index_tool.vector.errors import (
+                IndexNotFoundError,
+                NamedIndexNotFoundError,
+                VectorSearchError,
+            )
         except ImportError:
             typer.echo(
                 "Error: Vector search dependencies not installed. "
@@ -3864,13 +3883,29 @@ def query_command(
             raise typer.Exit(1)
 
         try:
-            vector_searcher = VectorSearcher()
+            # Determine which index to use
+            effective_index = index_name
+            if effective_index is None:
+                # Check for default index
+                effective_index = get_default_vector_index()
+
+            # Create searcher with index (None = legacy)
+            vector_searcher = VectorSearcher(index_name=effective_index)
+
             if not vector_searcher.index_exists():
-                typer.echo(
-                    "Error: Vector index not found. Build it first with: "
-                    "paper-index-tool reindex --vectors",
-                    err=True,
-                )
+                if effective_index:
+                    typer.echo(
+                        f"Error: Vector index '{effective_index}' not found or not built. "
+                        f"Build it with: paper-index-tool vector rebuild {effective_index}",
+                        err=True,
+                    )
+                else:
+                    typer.echo(
+                        "Error: No vector index found. Create one with:\n"
+                        "  paper-index-tool vector create <name> --model <model>\n"
+                        "Or use legacy index: paper-index-tool reindex --vectors",
+                        err=True,
+                    )
                 raise typer.Exit(1)
 
             results = vector_searcher.search(
@@ -3880,6 +3915,9 @@ def query_command(
                 extract_fragments_flag=fragments,
                 context_lines=context,
             )
+        except NamedIndexNotFoundError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
         except IndexNotFoundError:
             typer.echo(
                 "Error: Vector index not found. Build it first with: "
@@ -4077,6 +4115,430 @@ def reindex_command(
 
 
 # =============================================================================
+# Vector Index Commands
+# =============================================================================
+
+
+@vector_app.command(name="create")
+def vector_create_command(
+    name: Annotated[str, typer.Argument(help="Index name (e.g., 'nova-1024', 'titan-v2')")],
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            "-m",
+            help="Embedding model: titan-v1, titan-v2, cohere-en, cohere-multi, nova",
+        ),
+    ] = "titan-v2",
+    dimensions: Annotated[
+        int | None,
+        typer.Option(
+            "--dimensions", "-d", help="Embedding dimensions (for nova model: 256, 512, 1024)"
+        ),
+    ] = None,
+    chunk_size: Annotated[
+        int,
+        typer.Option("--chunk-size", help="Words per chunk"),
+    ] = 300,
+    chunk_overlap: Annotated[
+        int,
+        typer.Option("--chunk-overlap", help="Overlap words between chunks"),
+    ] = 50,
+    verbose: Annotated[int, typer.Option("--verbose", "-v", count=True, help="Verbosity")] = 0,
+) -> None:
+    """Create and build a new named vector index.
+
+    Creates a new vector index with the specified embedding model and
+    builds it by indexing all papers, books, and media.
+
+    \b
+    SUPPORTED MODELS:
+        titan-v1        amazon.titan-embed-text-v1 (1536 dims, fixed)
+        titan-v2        amazon.titan-embed-text-v2:0 (1024 dims, fixed) - DEFAULT
+        cohere-en       cohere.embed-english-v3 (1024 dims, fixed)
+        cohere-multi    cohere.embed-multilingual-v3 (1024 dims, fixed)
+        nova            amazon.nova-embed-text-v1:0 (256/512/1024 dims)
+
+    \b
+    EXAMPLES:
+        paper-index-tool vector create nova-1024 --model nova --dimensions 1024
+        paper-index-tool vector create titan-default --model titan-v2
+        paper-index-tool vector create cohere-search --model cohere-en
+
+    \b
+    NOTE: Building the index requires AWS Bedrock credentials.
+    """
+    setup_logging(verbose)
+    logger.info("Creating vector index '%s' with model '%s'", name, model)
+
+    from paper_index_tool.vector import VectorIndexRegistry, VectorSearcher
+    from paper_index_tool.vector.embeddings import (
+        EMBEDDING_MODELS,
+        get_model_config,
+        validate_dimensions,
+    )
+
+    # Validate model
+    if model not in EMBEDDING_MODELS:
+        valid_models = ", ".join(EMBEDDING_MODELS.keys())
+        typer.echo(f"Error: Unknown model '{model}'. Valid models: {valid_models}", err=True)
+        raise typer.Exit(1)
+
+    # Validate dimensions
+    try:
+        validated_dims = validate_dimensions(model, dimensions)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    registry = VectorIndexRegistry()
+
+    # Check if index already exists
+    if registry.index_exists(name):
+        typer.echo(
+            f"Error: Index '{name}' already exists. Delete it first or use a different name.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        # Create index
+        _metadata = registry.create_index(
+            name=name,
+            model_name=model,
+            dimensions=validated_dims,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+        config = get_model_config(model)
+        typer.echo(f"Created index '{name}':")
+        typer.echo(f"  Model: {model} ({config.model_id})")
+        typer.echo(f"  Dimensions: {validated_dims}")
+        typer.echo(f"  Chunk size: {chunk_size} words")
+        typer.echo(f"  Chunk overlap: {chunk_overlap} words")
+        typer.echo()
+
+        # Build the index
+        typer.echo("Building index...")
+        searcher = VectorSearcher(
+            index_name=name,
+            model_name=model,
+            dimensions=validated_dims,
+        )
+        counts = searcher.rebuild_index()
+
+        typer.echo()
+        typer.echo("Index built successfully:")
+        typer.echo(f"  Papers indexed: {counts['papers']}")
+        typer.echo(f"  Books indexed: {counts['books']}")
+        typer.echo(f"  Media indexed: {counts['media']}")
+        typer.echo(f"  Total chunks: {counts['chunks']}")
+        typer.echo(f"  Tokens processed: {counts['tokens']}")
+        typer.echo(f"  Estimated cost: ${counts['cost']:.6f}")
+
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        typer.echo(f"Error creating index: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@vector_app.command(name="list")
+def vector_list_command(
+    format_output: Annotated[
+        OutputFormat,
+        typer.Option("--format", "-f", help="Output format"),
+    ] = OutputFormat.HUMAN,
+    verbose: Annotated[int, typer.Option("--verbose", "-v", count=True, help="Verbosity")] = 0,
+) -> None:
+    """List all vector indices.
+
+    Shows all named vector indices with their configuration and statistics.
+
+    \b
+    EXAMPLES:
+        paper-index-tool vector list
+        paper-index-tool vector list --format json
+    """
+    setup_logging(verbose)
+
+    from paper_index_tool.settings import get_default_vector_index
+    from paper_index_tool.vector import VectorIndexRegistry
+
+    registry = VectorIndexRegistry()
+    indices = registry.list_indices()
+    default_index = get_default_vector_index()
+
+    if not indices:
+        typer.echo("No vector indices found.")
+        typer.echo()
+        typer.echo("Create one with:")
+        typer.echo("  paper-index-tool vector create <name> --model <model>")
+        return
+
+    if format_output == OutputFormat.JSON:
+        data = []
+        for idx in indices:
+            idx_data = idx.model_dump(mode="json")
+            idx_data["is_default"] = idx.name == default_index
+            data.append(idx_data)
+        typer.echo(json.dumps(data, indent=2))
+    else:
+        typer.echo(f"Vector Indices ({len(indices)}):")
+        typer.echo()
+        for idx in indices:
+            default_marker = " (default)" if idx.name == default_index else ""
+            model_name = registry.get_model_name_for_index(idx.name)
+            typer.echo(f"  {idx.name}{default_marker}")
+            typer.echo(f"    Model: {model_name} ({idx.embedding_model})")
+            typer.echo(f"    Dimensions: {idx.dimensions}")
+            typer.echo(f"    Chunks: {idx.chunk_count}")
+            typer.echo(f"    Cost: ${idx.estimated_cost_usd:.6f}")
+            typer.echo()
+
+
+@vector_app.command(name="info")
+def vector_info_command(
+    name: Annotated[str, typer.Argument(help="Index name")],
+    format_output: Annotated[
+        OutputFormat,
+        typer.Option("--format", "-f", help="Output format"),
+    ] = OutputFormat.HUMAN,
+    verbose: Annotated[int, typer.Option("--verbose", "-v", count=True, help="Verbosity")] = 0,
+) -> None:
+    """Show detailed information about a vector index.
+
+    \b
+    EXAMPLES:
+        paper-index-tool vector info nova-1024
+        paper-index-tool vector info nova-1024 --format json
+    """
+    setup_logging(verbose)
+
+    from paper_index_tool.settings import get_default_vector_index
+    from paper_index_tool.storage import (
+        get_named_index_chunks_path,
+        get_named_index_faiss_path,
+    )
+    from paper_index_tool.vector import VectorIndexRegistry
+    from paper_index_tool.vector.errors import NamedIndexNotFoundError
+
+    def format_size(size_bytes: int) -> str:
+        """Format file size in human-readable format."""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+    registry = VectorIndexRegistry()
+
+    try:
+        metadata = registry.get_index(name)
+        model_name = registry.get_model_name_for_index(name)
+        default_index = get_default_vector_index()
+
+        # Get file paths and sizes
+        faiss_path = get_named_index_faiss_path(name)
+        chunks_path = get_named_index_chunks_path(name)
+        faiss_size = faiss_path.stat().st_size if faiss_path.exists() else 0
+        chunks_size = chunks_path.stat().st_size if chunks_path.exists() else 0
+
+        if format_output == OutputFormat.JSON:
+            data = metadata.model_dump(mode="json")
+            data["model_name"] = model_name
+            data["is_default"] = name == default_index
+            data["faiss_path"] = str(faiss_path)
+            data["faiss_size_bytes"] = faiss_size
+            data["chunks_path"] = str(chunks_path)
+            data["chunks_size_bytes"] = chunks_size
+            typer.echo(json.dumps(data, indent=2))
+        else:
+            default_marker = " (default)" if name == default_index else ""
+            typer.echo(f"Index: {name}{default_marker}")
+            typer.echo(f"  Model: {model_name} ({metadata.embedding_model})")
+            typer.echo(f"  Dimensions: {metadata.dimensions}")
+            typer.echo(f"  Chunk size: {metadata.chunk_size} words")
+            typer.echo(f"  Chunk overlap: {metadata.chunk_overlap} words")
+            typer.echo(f"  Chunks: {metadata.chunk_count}")
+            typer.echo(f"  Tokens processed: {metadata.total_tokens}")
+            typer.echo(f"  Estimated cost: ${metadata.estimated_cost_usd:.6f}")
+            typer.echo(f"  Created: {metadata.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            typer.echo(f"  Updated: {metadata.updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            typer.echo(f"  FAISS index: {faiss_path} ({format_size(faiss_size)})")
+            typer.echo(f"  Chunks file: {chunks_path} ({format_size(chunks_size)})")
+
+    except NamedIndexNotFoundError:
+        typer.echo(f"Error: Index '{name}' not found.", err=True)
+        typer.echo()
+        typer.echo("List available indices with: paper-index-tool vector list", err=True)
+        raise typer.Exit(1)
+
+
+@vector_app.command(name="delete")
+def vector_delete_command(
+    name: Annotated[str, typer.Argument(help="Index name to delete")],
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Delete without confirmation"),
+    ] = False,
+    verbose: Annotated[int, typer.Option("--verbose", "-v", count=True, help="Verbosity")] = 0,
+) -> None:
+    """Delete a vector index.
+
+    \b
+    EXAMPLES:
+        paper-index-tool vector delete nova-1024
+        paper-index-tool vector delete nova-1024 --force
+    """
+    setup_logging(verbose)
+
+    from paper_index_tool.settings import clear_default_vector_index, get_default_vector_index
+    from paper_index_tool.vector import VectorIndexRegistry
+    from paper_index_tool.vector.errors import NamedIndexNotFoundError
+
+    registry = VectorIndexRegistry()
+
+    try:
+        # Check if index exists
+        metadata = registry.get_index(name)
+
+        if not force:
+            typer.confirm(f"Delete index '{name}' ({metadata.chunk_count} chunks)?", abort=True)
+
+        # Clear default if this is the default index
+        if get_default_vector_index() == name:
+            clear_default_vector_index()
+            typer.echo(f"Cleared default index (was '{name}')")
+
+        registry.delete_index(name)
+        typer.echo(f"Deleted index '{name}'")
+
+    except NamedIndexNotFoundError:
+        typer.echo(f"Error: Index '{name}' not found.", err=True)
+        raise typer.Exit(1)
+
+
+@vector_app.command(name="default")
+def vector_default_command(
+    name: Annotated[str | None, typer.Argument(help="Index name to set as default")] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", "-c", help="Clear the default index"),
+    ] = False,
+    verbose: Annotated[int, typer.Option("--verbose", "-v", count=True, help="Verbosity")] = 0,
+) -> None:
+    """Set or show the default vector index for semantic search.
+
+    Without arguments, shows the current default index.
+    With a name argument, sets that index as default.
+    With --clear, removes the default setting.
+
+    \b
+    EXAMPLES:
+        paper-index-tool vector default                # Show current default
+        paper-index-tool vector default nova-1024      # Set default
+        paper-index-tool vector default --clear        # Clear default
+    """
+    setup_logging(verbose)
+
+    from paper_index_tool.settings import (
+        clear_default_vector_index,
+        get_default_vector_index,
+        set_default_vector_index,
+    )
+    from paper_index_tool.vector import VectorIndexRegistry
+    from paper_index_tool.vector.errors import NamedIndexNotFoundError
+
+    registry = VectorIndexRegistry()
+
+    if clear:
+        clear_default_vector_index()
+        typer.echo("Cleared default vector index")
+        return
+
+    if name is None:
+        # Show current default
+        default = get_default_vector_index()
+        if default:
+            typer.echo(f"Default vector index: {default}")
+        else:
+            typer.echo("No default vector index set.")
+            typer.echo()
+            typer.echo("Set one with: paper-index-tool vector default <name>")
+        return
+
+    # Set default
+    try:
+        # Verify index exists
+        registry.get_index(name)
+        set_default_vector_index(name)
+        typer.echo(f"Set default vector index to '{name}'")
+
+    except NamedIndexNotFoundError:
+        typer.echo(f"Error: Index '{name}' not found.", err=True)
+        typer.echo()
+        typer.echo("List available indices with: paper-index-tool vector list", err=True)
+        raise typer.Exit(1)
+
+
+@vector_app.command(name="rebuild")
+def vector_rebuild_command(
+    name: Annotated[str, typer.Argument(help="Index name to rebuild")],
+    verbose: Annotated[int, typer.Option("--verbose", "-v", count=True, help="Verbosity")] = 0,
+) -> None:
+    """Rebuild an existing vector index.
+
+    Re-indexes all papers, books, and media using the index's configured model.
+
+    \b
+    EXAMPLES:
+        paper-index-tool vector rebuild nova-1024
+    """
+    setup_logging(verbose)
+
+    from paper_index_tool.vector import VectorIndexRegistry, VectorSearcher
+    from paper_index_tool.vector.errors import NamedIndexNotFoundError
+
+    registry = VectorIndexRegistry()
+
+    try:
+        # Verify index exists
+        metadata = registry.get_index(name)
+        model_name = registry.get_model_name_for_index(name)
+
+        typer.echo(f"Rebuilding index '{name}'...")
+        typer.echo(f"  Model: {model_name}")
+        typer.echo(f"  Dimensions: {metadata.dimensions}")
+        typer.echo()
+
+        searcher = VectorSearcher(
+            index_name=name,
+            model_name=model_name,
+            dimensions=metadata.dimensions,
+        )
+        counts = searcher.rebuild_index()
+
+        typer.echo("Index rebuilt successfully:")
+        typer.echo(f"  Papers indexed: {counts['papers']}")
+        typer.echo(f"  Books indexed: {counts['books']}")
+        typer.echo(f"  Media indexed: {counts['media']}")
+        typer.echo(f"  Total chunks: {counts['chunks']}")
+        typer.echo(f"  Tokens processed: {counts['tokens']}")
+        typer.echo(f"  Estimated cost: ${counts['cost']:.6f}")
+
+    except NamedIndexNotFoundError:
+        typer.echo(f"Error: Index '{name}' not found.", err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        typer.echo(f"Error rebuilding index: {e}", err=True)
+        raise typer.Exit(1)
+
+
+# =============================================================================
 # Register Sub-Apps
 # =============================================================================
 
@@ -4084,6 +4546,7 @@ def reindex_command(
 app.add_typer(paper_app, name="paper", help="Paper management commands")
 app.add_typer(book_app, name="book", help="Book management commands")
 app.add_typer(media_app, name="media", help="Media management commands (video, podcast, blog)")
+app.add_typer(vector_app, name="vector", help="Vector index management for semantic search")
 app.add_typer(completion_app, name="completion")
 
 

@@ -25,11 +25,13 @@ from paper_index_tool.storage import (
     PaperRegistry,
     get_chunks_path,
     get_faiss_index_path,
+    get_named_index_chunks_path,
+    get_named_index_faiss_path,
     get_vector_index_dir,
 )
-from paper_index_tool.vector.chunking import Chunk, TextChunker
+from paper_index_tool.vector.chunking import CharacterLimitChunker, Chunk, TextChunker
 from paper_index_tool.vector.embeddings import BedrockEmbeddings
-from paper_index_tool.vector.errors import IndexNotFoundError
+from paper_index_tool.vector.errors import IndexNotFoundError, NamedIndexNotFoundError
 
 logger = get_logger(__name__)
 
@@ -38,10 +40,12 @@ class VectorSearcher:
     """Semantic search using FAISS and Bedrock embeddings.
 
     Provides semantic search capabilities across papers, books, and media.
-    Uses AWS Bedrock Titan v2 for embeddings and FAISS for vector similarity.
+    Uses AWS Bedrock embedding models and FAISS for vector similarity.
 
     Unlike BM25 search which matches keywords, semantic search matches
     on meaning - enabling natural language queries like questions.
+
+    Supports multiple named indices with different embedding models.
 
     Attributes:
         embeddings: BedrockEmbeddings client.
@@ -49,28 +53,113 @@ class VectorSearcher:
         paper_registry: Registry for papers.
         book_registry: Registry for books.
         media_registry: Registry for media.
+        index_name: Name of the active index (None for legacy).
 
     Example:
-        >>> searcher = VectorSearcher()
+        >>> searcher = VectorSearcher(index_name="nova-1024")
         >>> searcher.rebuild_index()
         >>> results = searcher.search("How do leaders develop?", top_k=5)
         >>> for r in results:
         ...     print(f"{r.entry_id}: {r.score:.2f}")
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        index_name: str | None = None,
+        model_name: str | None = None,
+        dimensions: int | None = None,
+    ) -> None:
         """Initialize vector searcher.
 
         Creates embeddings client, chunker, and registry instances.
         Does not load the FAISS index until needed.
+
+        Args:
+            index_name: Named index to use (None for legacy single index).
+            model_name: Embedding model for queries. Required for named indices
+                        if not specified, will be loaded from index metadata.
+            dimensions: Embedding dimensions. Required for named indices
+                        if not specified, will be loaded from index metadata.
         """
-        self.embeddings = BedrockEmbeddings()
+        self.index_name = index_name
+        self._model_name = model_name
+        self._dimensions = dimensions
+
+        # Defer embeddings creation until we know the model
+        self._embeddings: BedrockEmbeddings | None = None
+
         self.chunker = TextChunker()
+        self._char_limit_chunker: CharacterLimitChunker | None = None
         self.paper_registry = PaperRegistry()
         self.book_registry = BookRegistry()
         self.media_registry = MediaRegistry()
         self._index: Any = None  # FAISS index
         self._chunks: list[Chunk] = []
+
+    def _get_char_limit_chunker(self) -> CharacterLimitChunker:
+        """Get character limit chunker based on embedding model.
+
+        Creates a CharacterLimitChunker with max_chars derived from
+        the embedding model's max_input_tokens (~4.7 chars per token).
+
+        Returns:
+            CharacterLimitChunker configured for the current model.
+        """
+        if self._char_limit_chunker is not None:
+            return self._char_limit_chunker
+
+        # Get model's max tokens and calculate max chars
+        model_config = self.embeddings.config
+        max_chars = int(model_config.max_input_tokens * 4.7)
+
+        self._char_limit_chunker = CharacterLimitChunker(max_chars=max_chars)
+        logger.debug(
+            "Created CharacterLimitChunker with max_chars=%d (model: %s, max_tokens=%d)",
+            max_chars,
+            self.embeddings.model_name,
+            model_config.max_input_tokens,
+        )
+        return self._char_limit_chunker
+
+    @property
+    def embeddings(self) -> BedrockEmbeddings:
+        """Get or create embeddings client.
+
+        For named indices, loads model config from index metadata.
+        """
+        if self._embeddings is not None:
+            return self._embeddings
+
+        if self.index_name:
+            # Load model from index metadata
+            from paper_index_tool.vector.registry import VectorIndexRegistry
+
+            registry = VectorIndexRegistry()
+            try:
+                metadata = registry.get_index(self.index_name)
+                model_name = registry.get_model_name_for_index(self.index_name)
+                self._embeddings = BedrockEmbeddings(
+                    model_name=model_name,
+                    dimensions=metadata.dimensions,
+                )
+            except NamedIndexNotFoundError:
+                # Index doesn't exist yet, use provided or default model
+                if self._model_name:
+                    self._embeddings = BedrockEmbeddings(
+                        model_name=self._model_name,
+                        dimensions=self._dimensions,
+                    )
+                else:
+                    # Default to titan-v2
+                    self._embeddings = BedrockEmbeddings()
+        else:
+            # Legacy mode - use default model
+            self._embeddings = BedrockEmbeddings(
+                model_name=self._model_name or "titan-v2",
+                dimensions=self._dimensions,
+            )
+
+        return self._embeddings
 
     def _get_faiss(self) -> Any:
         """Import and return faiss module.
@@ -118,6 +207,8 @@ class VectorSearcher:
         Chunks all papers, books, and media, generates embeddings
         via Bedrock, and builds a FAISS index for similarity search.
 
+        For named indices, updates the index metadata with statistics.
+
         Returns:
             Dictionary with counts and cost:
             {"papers": N, "books": M, "media": P, "chunks": C, "tokens": T, "cost": $}.
@@ -127,7 +218,8 @@ class VectorSearcher:
             >>> print(f"Indexed {counts['chunks']} chunks, cost: ${counts['cost']:.6f}")
         """
         faiss = self._get_faiss()
-        logger.info("Rebuilding vector index")
+        index_desc = f"'{self.index_name}'" if self.index_name else "(legacy)"
+        logger.info("Rebuilding vector index %s", index_desc)
 
         # Collect all chunks
         all_chunks: list[Chunk] = []
@@ -160,6 +252,10 @@ class VectorSearcher:
             counts["cost"] = 0.0
             return counts
 
+        # Apply character limit chunker to enforce model limits
+        char_limit_chunker = self._get_char_limit_chunker()
+        all_chunks = char_limit_chunker.process_chunks(all_chunks)
+
         counts["chunks"] = len(all_chunks)
         logger.info("Generating embeddings for %d chunks", len(all_chunks))
 
@@ -183,19 +279,34 @@ class VectorSearcher:
         faiss.normalize_L2(embeddings_array)
         index.add(embeddings_array)
 
-        # Save index
-        index_dir = get_vector_index_dir()
-        index_dir.mkdir(parents=True, exist_ok=True)
+        # Save index to appropriate location
+        if self.index_name:
+            # Named index - use registry
+            from paper_index_tool.vector.registry import VectorIndexRegistry
 
-        faiss.write_index(index, str(get_faiss_index_path()))
+            registry = VectorIndexRegistry()
+            registry.save_index_data(self.index_name, index, all_chunks)
+            registry.update_index_stats(
+                self.index_name,
+                chunk_count=len(all_chunks),
+                total_tokens=int(stats.total_tokens),
+                estimated_cost_usd=stats.total_cost,
+            )
+        else:
+            # Legacy single index
+            index_dir = get_vector_index_dir()
+            index_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save chunk metadata
-        chunks_data = [chunk.to_dict() for chunk in all_chunks]
-        with open(get_chunks_path(), "w") as f:
-            json.dump(chunks_data, f, indent=2)
+            faiss.write_index(index, str(get_faiss_index_path()))
+
+            # Save chunk metadata
+            chunks_data = [chunk.to_dict() for chunk in all_chunks]
+            with open(get_chunks_path(), "w") as f:
+                json.dump(chunks_data, f, indent=2)
 
         logger.info(
-            "Vector index built: %d papers, %d books, %d media, %d chunks, %d tokens, $%.6f",
+            "Vector index %s built: %d papers, %d books, %d media, %d chunks, %d tokens, $%.6f",
+            index_desc,
             counts["papers"],
             counts["books"],
             counts["media"],
@@ -218,11 +329,25 @@ class VectorSearcher:
 
         Raises:
             IndexNotFoundError: If index doesn't exist.
+            NamedIndexNotFoundError: If named index doesn't exist.
         """
         if self._index is not None and self._chunks:
             return self._index, self._chunks
 
         faiss = self._get_faiss()
+
+        if self.index_name:
+            # Named index - use registry
+            from paper_index_tool.vector.registry import VectorIndexRegistry
+
+            registry = VectorIndexRegistry()
+            self._index, self._chunks = registry.load_index_data(self.index_name)
+            logger.debug(
+                "Loaded named index '%s' with %d chunks", self.index_name, len(self._chunks)
+            )
+            return self._index, self._chunks
+
+        # Legacy single index
         index_path = get_faiss_index_path()
         chunks_path = get_chunks_path()
 
@@ -279,8 +404,8 @@ class VectorSearcher:
         np = self._get_numpy()
         index, chunks = self._load_index()
 
-        # Embed query
-        query_embedding = self.embeddings.embed_text(query)
+        # Embed query (uses TEXT_RETRIEVAL purpose for Nova model)
+        query_embedding = self.embeddings.embed_query(query)
         query_array = np.array([query_embedding], dtype=np.float32)
         faiss.normalize_L2(query_array)
 
@@ -361,4 +486,11 @@ class VectorSearcher:
         Returns:
             True if index exists, False otherwise.
         """
+        if self.index_name:
+            # Named index - check via registry
+            faiss_path = get_named_index_faiss_path(self.index_name)
+            chunks_path = get_named_index_chunks_path(self.index_name)
+            return faiss_path.exists() and chunks_path.exists()
+
+        # Legacy single index
         return get_faiss_index_path().exists() and get_chunks_path().exists()

@@ -7,12 +7,19 @@ like page numbers and section headers.
 Classes:
     Chunk: A text chunk with metadata.
     TextChunker: Splits text into chunks with overlap.
+    CharacterLimitChunker: Enforces character limits on chunks.
+    ChunkerPipeline: Chains multiple chunkers together.
 
 Chunking Strategy:
     - Target size: ~300 words per chunk
     - Overlap: 50 words between chunks
     - Page detection via [PAGE:N] markers
     - Section detection via markdown headers (## Header)
+
+Pipeline Usage:
+    >>> pipeline = TextChunker(300, 50) | CharacterLimitChunker(2400)
+    >>> chunks = chunker.chunk_text(text, "id", "paper")
+    >>> chunks = pipeline.process_chunks(chunks)
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from paper_index_tool.logging_config import get_logger
+from paper_index_tool.vector.errors import ChunkingError
 
 logger = get_logger(__name__)
 
@@ -153,6 +161,22 @@ class TextChunker:
         self.chunk_size = chunk_size
         self.overlap = overlap
         self.min_chunk_size = min_chunk_size
+
+    def __or__(self, other: CharacterLimitChunker | ChunkerPipeline) -> ChunkerPipeline:
+        """Chain another chunker to create a pipeline.
+
+        Args:
+            other: Chunker or pipeline to chain.
+
+        Returns:
+            ChunkerPipeline with this chunker and the other.
+
+        Example:
+            >>> pipeline = TextChunker(300, 50) | CharacterLimitChunker(2400)
+        """
+        if isinstance(other, ChunkerPipeline):
+            return ChunkerPipeline([self] + other.chunkers)
+        return ChunkerPipeline([self, other])
 
     def chunk_text(
         self,
@@ -323,3 +347,180 @@ class TextChunker:
                 break
 
         return chunks
+
+
+class ChunkerPipeline:
+    """Pipeline for chaining multiple chunkers together.
+
+    Allows composing chunkers using the `|` operator. The first chunker
+    creates initial chunks, then subsequent chunkers process them.
+
+    Attributes:
+        chunkers: List of chunkers in the pipeline.
+
+    Example:
+        >>> pipeline = TextChunker(300, 50) | CharacterLimitChunker(2400)
+        >>> chunks = chunker.chunk_text(text, "id", "paper")
+        >>> chunks = pipeline.process_chunks(chunks)
+    """
+
+    def __init__(self, chunkers: list[Any]) -> None:
+        """Initialize the chunker pipeline.
+
+        Args:
+            chunkers: List of chunkers to chain together (TextChunker,
+                     CharacterLimitChunker, or any chunker with process_chunks).
+
+        Raises:
+            ChunkingError: If pipeline is empty.
+        """
+        if not chunkers:
+            raise ChunkingError("Pipeline requires at least one chunker")
+        self.chunkers: list[Any] = chunkers
+
+    def __or__(self, other: CharacterLimitChunker | ChunkerPipeline) -> ChunkerPipeline:
+        """Chain another chunker or pipeline.
+
+        Args:
+            other: Chunker or pipeline to chain.
+
+        Returns:
+            New ChunkerPipeline with all chunkers combined.
+        """
+        if isinstance(other, ChunkerPipeline):
+            return ChunkerPipeline(self.chunkers + other.chunkers)
+        return ChunkerPipeline(self.chunkers + [other])
+
+    def process_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Process chunks through the pipeline.
+
+        Each chunker after the first processes the chunks from the
+        previous stage.
+
+        Args:
+            chunks: Initial chunks to process.
+
+        Returns:
+            List of processed chunks.
+        """
+        for chunker in self.chunkers:
+            if hasattr(chunker, "process_chunks"):
+                chunks = chunker.process_chunks(chunks)
+
+        return chunks
+
+
+class CharacterLimitChunker:
+    """Enforces character limits on chunks by truncation.
+
+    Designed to be used in a pipeline after TextChunker to ensure
+    chunks don't exceed embedding model character limits.
+
+    Attributes:
+        max_chars: Maximum characters per chunk.
+
+    Example:
+        >>> pipeline = TextChunker(300, 50) | CharacterLimitChunker(2400)
+        >>> # For Nova model with 512 tokens (~2400 chars)
+    """
+
+    def __init__(self, max_chars: int = 2400) -> None:
+        """Initialize the character limit chunker.
+
+        Args:
+            max_chars: Maximum characters per chunk (default: 2400 for Nova).
+
+        Raises:
+            ChunkingError: If max_chars is not positive.
+        """
+        if max_chars <= 0:
+            raise ChunkingError(f"max_chars must be positive, got {max_chars}")
+        self.max_chars = max_chars
+
+    def __or__(self, other: CharacterLimitChunker | ChunkerPipeline) -> ChunkerPipeline:
+        """Chain another chunker to create a pipeline.
+
+        Args:
+            other: Chunker or pipeline to chain.
+
+        Returns:
+            ChunkerPipeline with this chunker and the other.
+        """
+        if isinstance(other, ChunkerPipeline):
+            return ChunkerPipeline([self] + other.chunkers)
+        return ChunkerPipeline([self, other])
+
+    def process_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Process chunks to enforce character limits.
+
+        Chunks exceeding the limit are truncated at word boundaries.
+        Single words exceeding the limit are hard-truncated.
+
+        Args:
+            chunks: List of chunks to process.
+
+        Returns:
+            List of processed chunks with enforced limits.
+        """
+        processed: list[Chunk] = []
+        truncated_count = 0
+
+        for chunk in chunks:
+            if len(chunk.text) <= self.max_chars:
+                processed.append(chunk)
+            else:
+                # Truncate the text
+                truncated_text = self._truncate_text(chunk.text)
+                truncated_count += 1
+
+                # Create new chunk with truncated text
+                new_chunk = Chunk(
+                    entry_id=chunk.entry_id,
+                    entry_type=chunk.entry_type,
+                    chunk_index=chunk.chunk_index,
+                    text=truncated_text,
+                    page_start=chunk.page_start,
+                    page_end=chunk.page_end,
+                    section=chunk.section,
+                    line_start=chunk.line_start,
+                    line_end=chunk.line_end,
+                )
+                processed.append(new_chunk)
+
+        if truncated_count > 0:
+            logger.warning(
+                "Truncated %d chunks exceeding %d character limit",
+                truncated_count,
+                self.max_chars,
+            )
+
+        return processed
+
+    def _truncate_text(self, text: str) -> str:
+        """Truncate text to the character limit.
+
+        Tries to truncate at word boundaries, but will hard-truncate
+        if no word boundary is found.
+
+        Args:
+            text: Text to truncate.
+
+        Returns:
+            Truncated text.
+        """
+        if len(text) <= self.max_chars:
+            return text
+
+        # Try to truncate at word boundary
+        truncated = text[: self.max_chars]
+        last_space = truncated.rfind(" ")
+
+        if last_space > 0:
+            return truncated[:last_space]
+        else:
+            # No space found, hard truncate
+            logger.warning(
+                "Hard truncating text at %d chars (no word boundary found)",
+                self.max_chars,
+            )
+            return truncated
