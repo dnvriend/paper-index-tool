@@ -76,17 +76,25 @@ def validate_id_format(value: str, field_name: str = "id") -> str:
         'adams2012a'
         >>> validate_id_format("vogelgesang2023ch1")
         'vogelgesang2023ch1'
+        >>> validate_id_format("ashford2017pod")
+        'ashford2017pod'
+        >>> validate_id_format("ashford2017vida")
+        'ashford2017vida'
     """
-    # Allow <surname><year> optionally followed by a single letter OR 'ch' + digits
-    pattern = r"^[a-z]+\d{4}([a-z]|ch\d+)?$"
+    # Allow <surname><year> optionally followed by:
+    # - single letter (a, b, c)
+    # - 'ch' + digits (ch1, ch2)
+    # - media type (pod, vid, blg) optionally followed by a letter
+    pattern = r"^[a-z]+\d{4}([a-z]|ch\d+|(pod|vid|blg)[a-z]?)?$"
     value_lower = value.lower()
     if not re.match(pattern, value_lower):
         raise ValueError(
             f"Invalid {field_name} format: '{value}'. "
             f"Expected format: <surname><year>[suffix], "
-            f"e.g., 'ashford2012', 'adams2012a', or 'vogelgesang2023ch1'. "
+            f"e.g., 'ashford2012', 'adams2012a', 'vogelgesang2023ch1', "
+            f"'ashford2017pod', 'ashford2017vid', 'ashford2017blg'. "
             f"Rules: lowercase letters followed by 4-digit year, "
-            f"optional suffix (letter or ch + number)."
+            f"optional suffix (letter, ch + number, or media type pod/vid/blg)."
         )
     return value_lower
 

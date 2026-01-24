@@ -1076,6 +1076,71 @@ def paper_delete(
         typer.echo(f"Deleted paper: {paper_id}")
 
 
+@paper_app.command(name="rename")
+def paper_rename(
+    old_id: Annotated[str, typer.Argument(help="Current paper ID")],
+    new_id: Annotated[str, typer.Argument(help="New paper ID")],
+    force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", help="Output format")
+    ] = OutputFormat.HUMAN,
+) -> None:
+    """Rename a paper by changing its ID.
+
+    \b
+    Examples:
+        paper-index-tool paper rename test2024 renamed2024
+        paper-index-tool paper rename test2024 renamed2024 --force
+    """
+    logger.info("Renaming paper: %s -> %s", old_id, new_id)
+
+    registry = PaperRegistry()
+
+    if not registry.paper_exists(old_id):
+        typer.echo(
+            f"Error: Paper '{old_id}' not found. "
+            f"Use 'paper-index-tool paper list' to see available papers.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if registry.paper_exists(new_id):
+        typer.echo(
+            f"Error: Paper '{new_id}' already exists. "
+            f"Choose a different ID or delete the existing paper first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not force:
+        confirm = typer.confirm(f"Rename paper '{old_id}' to '{new_id}'?")
+        if not confirm:
+            typer.echo("Cancelled")
+            raise typer.Exit(0)
+
+    try:
+        registry.rename_paper(old_id, new_id)
+    except EntryNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except EntryExistsError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    # Rebuild search index
+    from paper_index_tool.search import PaperSearcher
+
+    PaperSearcher().rebuild_index()
+
+    if output_format == OutputFormat.JSON:
+        typer.echo(json.dumps({"status": "renamed", "old_id": old_id, "new_id": new_id}))
+    else:
+        typer.echo(f"Renamed paper: {old_id} -> {new_id}")
+
+
 @paper_app.command(name="list")
 def paper_list(
     output_format: Annotated[
@@ -1803,6 +1868,71 @@ def book_delete(
         err=True,
     )
     raise typer.Exit(1)
+
+
+@book_app.command(name="rename")
+def book_rename(
+    old_id: Annotated[str, typer.Argument(help="Current book ID")],
+    new_id: Annotated[str, typer.Argument(help="New book ID")],
+    force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", help="Output format")
+    ] = OutputFormat.HUMAN,
+) -> None:
+    """Rename a book by changing its ID.
+
+    \b
+    Examples:
+        paper-index-tool book rename vogelgesang2023ch1 vogelgesang2023ch2
+        paper-index-tool book rename vogelgesang2023ch1 vogelgesang2023ch2 --force
+    """
+    logger.info("Renaming book: %s -> %s", old_id, new_id)
+
+    registry = BookRegistry()
+
+    if not registry.book_exists(old_id):
+        typer.echo(
+            f"Error: Book '{old_id}' not found. "
+            f"Use 'paper-index-tool book list' to see available books.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if registry.book_exists(new_id):
+        typer.echo(
+            f"Error: Book '{new_id}' already exists. "
+            f"Choose a different ID or delete the existing book first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not force:
+        confirm = typer.confirm(f"Rename book '{old_id}' to '{new_id}'?")
+        if not confirm:
+            typer.echo("Cancelled")
+            raise typer.Exit(0)
+
+    try:
+        registry.rename_book(old_id, new_id)
+    except EntryNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except EntryExistsError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    # Rebuild search index
+    from paper_index_tool.search import BookSearcher
+
+    BookSearcher().rebuild_index()
+
+    if output_format == OutputFormat.JSON:
+        typer.echo(json.dumps({"status": "renamed", "old_id": old_id, "new_id": new_id}))
+    else:
+        typer.echo(f"Renamed book: {old_id} -> {new_id}")
 
 
 @book_app.command(name="list")
@@ -2744,6 +2874,71 @@ def media_delete(
         typer.echo(json.dumps({"status": "deleted", "id": media_id}))
     else:
         typer.echo(f"Deleted media: {media_id}")
+
+
+@media_app.command(name="rename")
+def media_rename(
+    old_id: Annotated[str, typer.Argument(help="Current media ID")],
+    new_id: Annotated[str, typer.Argument(help="New media ID")],
+    force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", help="Output format")
+    ] = OutputFormat.HUMAN,
+) -> None:
+    """Rename a media entry by changing its ID.
+
+    \b
+    Examples:
+        paper-index-tool media rename ashford2017 ashford2017b
+        paper-index-tool media rename ashford2017 ashford2017b --force
+    """
+    logger.info("Renaming media: %s -> %s", old_id, new_id)
+
+    registry = MediaRegistry()
+
+    if not registry.media_exists(old_id):
+        typer.echo(
+            f"Error: Media '{old_id}' not found. "
+            f"Use 'paper-index-tool media list' to see available media.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if registry.media_exists(new_id):
+        typer.echo(
+            f"Error: Media '{new_id}' already exists. "
+            f"Choose a different ID or delete the existing media first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not force:
+        confirm = typer.confirm(f"Rename media '{old_id}' to '{new_id}'?")
+        if not confirm:
+            typer.echo("Cancelled")
+            raise typer.Exit(0)
+
+    try:
+        registry.rename_media(old_id, new_id)
+    except EntryNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except EntryExistsError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    # Rebuild search index
+    from paper_index_tool.search import MediaSearcher
+
+    MediaSearcher().rebuild_index()
+
+    if output_format == OutputFormat.JSON:
+        typer.echo(json.dumps({"status": "renamed", "old_id": old_id, "new_id": new_id}))
+    else:
+        typer.echo(f"Renamed media: {old_id} -> {new_id}")
 
 
 @media_app.command(name="list")

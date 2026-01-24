@@ -622,6 +622,64 @@ class BaseRegistry[T: BaseModel](ABC):
         logger.info("Cleared %d %ss from registry", count, self.entity_name)
         return count
 
+    def rename_entry(self, old_id: str, new_id: str) -> T:
+        """Rename an entry by changing its ID.
+
+        Validates the old ID exists, new ID doesn't exist, and new ID format
+        is valid. Updates the entry's ID field and updated_at timestamp.
+
+        Args:
+            old_id: Current ID of the entry to rename.
+            new_id: New ID for the entry.
+
+        Returns:
+            The renamed and validated model object.
+
+        Raises:
+            EntryNotFoundError: If old_id not found in registry.
+            EntryExistsError: If new_id already exists in registry.
+            ValueError: If new_id format is invalid.
+
+        Example:
+            >>> paper = paper_registry.rename_entry("test2024", "renamed2024")
+            >>> paper.id
+            'renamed2024'
+        """
+        # Validate new_id format (alphanumeric with optional underscores/hyphens)
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", new_id):
+            raise ValueError(
+                f"Invalid {self.entity_name} ID format: '{new_id}'. "
+                f"ID must start with alphanumeric and contain only alphanumeric, "
+                f"underscores, or hyphens."
+            )
+
+        registry = self._load_registry()
+
+        if old_id not in registry:
+            raise EntryNotFoundError(self.entity_name, old_id)
+
+        if new_id in registry:
+            raise EntryExistsError(self.entity_name, new_id)
+
+        # Move entry to new ID
+        entry_data = registry[old_id]
+        entry_data["id"] = new_id
+        entry_data["updated_at"] = datetime.now().isoformat()
+
+        # Validate and save
+        entry = self.model_class.model_validate(entry_data)
+        registry[new_id] = entry.model_dump(mode="json")
+        del registry[old_id]
+        self._save_registry(registry)
+
+        logger.info(
+            "Renamed %s '%s' to '%s'",
+            self.entity_name,
+            old_id,
+            new_id,
+        )
+        return entry
+
 
 class PaperRegistry(BaseRegistry[Paper]):
     """Manages the paper registry (papers.json).
@@ -763,6 +821,25 @@ class PaperRegistry(BaseRegistry[Paper]):
         """
         return self.entry_exists(paper_id)
 
+    def rename_paper(self, old_id: str, new_id: str) -> Paper:
+        """Rename a paper by changing its ID.
+
+        Alias for rename_entry() for backward compatibility.
+
+        Args:
+            old_id: Current paper ID.
+            new_id: New paper ID.
+
+        Returns:
+            Renamed Paper object.
+
+        Raises:
+            EntryNotFoundError: If old_id not found.
+            EntryExistsError: If new_id already exists.
+            ValueError: If new_id format is invalid.
+        """
+        return self.rename_entry(old_id, new_id)
+
 
 class BookRegistry(BaseRegistry[Book]):
     """Manages the book registry (books.json).
@@ -903,6 +980,25 @@ class BookRegistry(BaseRegistry[Book]):
             True if book exists, False otherwise.
         """
         return self.entry_exists(book_id)
+
+    def rename_book(self, old_id: str, new_id: str) -> Book:
+        """Rename a book by changing its ID.
+
+        Alias for rename_entry() for API consistency.
+
+        Args:
+            old_id: Current book ID.
+            new_id: New book ID.
+
+        Returns:
+            Renamed Book object.
+
+        Raises:
+            EntryNotFoundError: If old_id not found.
+            EntryExistsError: If new_id already exists.
+            ValueError: If new_id format is invalid.
+        """
+        return self.rename_entry(old_id, new_id)
 
     # =========================================================================
     # Chapter Grouping Methods
@@ -1196,3 +1292,22 @@ class MediaRegistry(BaseRegistry[Media]):
             True if media exists, False otherwise.
         """
         return self.entry_exists(media_id)
+
+    def rename_media(self, old_id: str, new_id: str) -> Media:
+        """Rename a media entry by changing its ID.
+
+        Alias for rename_entry() for API consistency.
+
+        Args:
+            old_id: Current media ID.
+            new_id: New media ID.
+
+        Returns:
+            Renamed Media object.
+
+        Raises:
+            EntryNotFoundError: If old_id not found.
+            EntryExistsError: If new_id already exists.
+            ValueError: If new_id format is invalid.
+        """
+        return self.rename_entry(old_id, new_id)
