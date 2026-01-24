@@ -654,24 +654,34 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """Academic paper, book, and media index management tool with BM25 search.
+    """Academic paper, book, and media index with BM25 and semantic search.
+
+    Provides keyword search (BM25) and natural language search (AWS Bedrock
+    Nova embeddings) across academic papers, books, and media content.
 
     \b
     SUBCOMMANDS:
         paper       Manage academic papers (CRUD, field queries, bibtex export)
         book        Manage books and chapters (CRUD, field queries, bibtex export)
         media       Manage media entries: video, podcast, blog (CRUD, field queries)
+        vector      Manage vector indices for semantic search (AWS Bedrock)
         stats       Show statistics (counts by author, year, keywords)
-        query       BM25 full-text search across all entries
-        reindex     Rebuild search index after bulk operations
+        query       Search entries (BM25 keyword or semantic with -s flag)
+        reindex     Rebuild BM25 search index after bulk operations
         export      Export all data to JSON backup file
         import      Import data from JSON backup file
+
+    \b
+    SEARCH MODES:
+        query "terms" --all           BM25 keyword search (default)
+        query "natural language" -s   Semantic search via AWS Nova embeddings
 
     \b
     QUICK START:
         paper-index-tool paper create ashford2012 --title "Developing as a leader" ...
         paper-index-tool paper show ashford2012
         paper-index-tool query "leadership identity" --all
+        paper-index-tool query "How do leaders develop?" --all -s
         paper-index-tool stats
 
     \b
@@ -679,7 +689,8 @@ def main(
         ~/.config/paper-index-tool/papers.json   - Paper entries
         ~/.config/paper-index-tool/books.json    - Book entries
         ~/.config/paper-index-tool/media.json    - Media entries
-        ~/.config/paper-index-tool/bm25s/        - Search index
+        ~/.config/paper-index-tool/bm25s/        - BM25 search index
+        ~/.config/paper-index-tool/vector/       - Vector indices (FAISS)
     """
     setup_logging(verbose)
 
