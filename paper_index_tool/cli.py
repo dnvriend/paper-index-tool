@@ -624,14 +624,6 @@ def _get_media_or_exit(media_id: str) -> Media:
 
 
 @traced("main")
-def _run_main_command() -> None:
-    """Execute main command logic with tracing."""
-    logger.info("paper-index-tool started")
-    typer.echo("paper-index-tool - Academic paper and book index management")
-    typer.echo("Use --help for available commands")
-    logger.info("paper-index-tool completed")
-
-
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -698,7 +690,7 @@ def main(
     atexit.register(_shutdown_telemetry)
 
     if ctx.invoked_subcommand is None:
-        _run_main_command()
+        typer.echo(ctx.get_help())
 
 
 # =============================================================================
