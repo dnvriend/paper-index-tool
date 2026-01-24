@@ -47,16 +47,20 @@ logger = get_logger(__name__)
 
 app = typer.Typer(invoke_without_command=True)
 paper_app = typer.Typer(
-    help="Manage academic papers: create, read, update, delete, query fields, export bibtex"
+    help="Manage academic papers: create, read, update, delete, query fields, export bibtex",
+    invoke_without_command=True,
 )
 book_app = typer.Typer(
-    help="Manage books and chapters: create, read, update, delete, query fields, export bibtex"
+    help="Manage books and chapters: create, read, update, delete, query fields, export bibtex",
+    invoke_without_command=True,
 )
 media_app = typer.Typer(
-    help="Manage media (video, podcast, blog): create, read, update, delete, query fields"
+    help="Manage media (video, podcast, blog): create, read, update, delete, query fields",
+    invoke_without_command=True,
 )
 vector_app = typer.Typer(
-    help="Manage vector indices for semantic search: create, list, info, delete, default"
+    help="Manage vector indices for semantic search: create, list, info, delete, default",
+    invoke_without_command=True,
 )
 
 
@@ -4655,6 +4659,39 @@ def vector_rebuild_command(
     except Exception as e:
         typer.echo(f"Error rebuilding index: {e}", err=True)
         raise typer.Exit(1)
+
+
+# =============================================================================
+# Sub-App Callbacks (show help when no subcommand provided)
+# =============================================================================
+
+
+@paper_app.callback(invoke_without_command=True)
+def paper_callback(ctx: typer.Context) -> None:
+    """Paper management commands."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+
+
+@book_app.callback(invoke_without_command=True)
+def book_callback(ctx: typer.Context) -> None:
+    """Book management commands."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+
+
+@media_app.callback(invoke_without_command=True)
+def media_callback(ctx: typer.Context) -> None:
+    """Media management commands."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+
+
+@vector_app.callback(invoke_without_command=True)
+def vector_callback(ctx: typer.Context) -> None:
+    """Vector index management commands."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
 
 
 # =============================================================================
