@@ -398,7 +398,10 @@ class VectorSearcher:
             ...     top_k=5
             ... )
         """
-        logger.info("Semantic search for: %s", query[:100])
+        if entry_id:
+            logger.info("Semantic search in '%s' for: %s", entry_id, query[:100])
+        else:
+            logger.info("Semantic search for: %s", query[:100])
 
         faiss = self._get_faiss()
         np = self._get_numpy()
@@ -477,7 +480,10 @@ class VectorSearcher:
             )
             results.append(result)
 
-        logger.info("Found %d semantic results", len(results))
+        if entry_id:
+            logger.info("Found %d semantic results in '%s'", len(results), entry_id)
+        else:
+            logger.info("Found %d semantic results", len(results))
         return results
 
     def index_exists(self) -> bool:

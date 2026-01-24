@@ -2181,19 +2181,24 @@ def book_query(
     query_terms = search_query.split()
 
     if semantic:
-        # Semantic search across chapters
+        # Semantic search across chapters (parallel)
         try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            from paper_index_tool.settings import get_default_vector_index
             from paper_index_tool.vector.search import VectorSearcher
 
-            searcher = VectorSearcher(index_name=index_name)
+            # Use default index if not specified
+            effective_index = index_name if index_name is not None else get_default_vector_index()
+            searcher = VectorSearcher(index_name=effective_index)
             if not searcher.index_exists():
                 typer.echo(
                     "Vector index not found. Run 'paper-index-tool vector reindex' first.", err=True
                 )
                 raise typer.Exit(1)
 
-            # Search each chapter using vector similarity
-            for chapter in chapters:
+            def search_chapter(chapter: Book) -> dict[str, Any] | None:
+                """Search a single chapter and return result dict."""
                 results = searcher.search(
                     query=search_query,
                     entry_id=chapter.id,
@@ -2211,7 +2216,25 @@ def book_query(
                     }
                     if fragments and sr.fragments:
                         chapter_result["fragments"] = sr.fragments
-                    all_results.append(chapter_result)
+                    return chapter_result
+                return None
+
+            # Search chapters in parallel with progress bar
+            from tqdm import tqdm
+
+            with ThreadPoolExecutor(max_workers=min(len(chapters), 10)) as executor:
+                futures = {executor.submit(search_chapter, ch): ch for ch in chapters}
+                with tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc="Searching chapters",
+                    unit="ch",
+                    disable=output_format == OutputFormat.JSON,
+                ) as pbar:
+                    for future in pbar:
+                        chapter_result = future.result()
+                        if chapter_result:
+                            all_results.append(chapter_result)
         except ImportError:
             typer.echo(
                 "Vector search requires faiss-cpu. Install with: uv sync --extra vector",
@@ -3056,9 +3079,12 @@ def media_query(
     if semantic:
         # Semantic search
         try:
+            from paper_index_tool.settings import get_default_vector_index
             from paper_index_tool.vector.search import VectorSearcher
 
-            searcher = VectorSearcher(index_name=index_name)
+            # Use default index if not specified
+            effective_index = index_name if index_name is not None else get_default_vector_index()
+            searcher = VectorSearcher(index_name=effective_index)
             if not searcher.index_exists():
                 typer.echo(
                     "Vector index not found. Run 'paper-index-tool vector reindex' first.", err=True
@@ -3838,6 +3864,12 @@ def query_command(
     semantic: Annotated[
         bool, typer.Option("--semantic", "-s", help="Semantic search (natural language)")
     ] = False,
+    both: Annotated[
+        bool,
+        typer.Option(
+            "--both", "-H", help="Run both BM25 and semantic search, return separate results"
+        ),
+    ] = False,
     index_name: Annotated[
         str | None, typer.Option("--index", "-i", help="Named vector index for semantic search")
     ] = None,
@@ -3864,9 +3896,10 @@ def query_command(
     SEARCH TYPE:
         (default)       BM25 keyword search - use keywords like "leadership identity"
         --semantic, -s  Semantic search - use natural language like "How do leaders develop?"
+        --both, -H      Hybrid search - run both BM25 and semantic, show results separately
 
     \b
-    VECTOR INDEX (for semantic search):
+    VECTOR INDEX (for semantic/hybrid search):
         --index <name>  Use a specific named vector index (default: settings default or legacy)
 
     \b
@@ -3896,12 +3929,16 @@ def query_command(
         # Search single paper, JSON output
         paper-index-tool query "narcissism" --paper cesinger2023 --format json
 
-    \b
-    JSON OUTPUT SCHEMA:
-        [{"id": "...", "type": "paper|book|media", "score": 0.85, "title": "..."}]
+        # Hybrid search - compare BM25 and semantic results
+        paper-index-tool query "leadership" --all --both
 
     \b
-    NOTE: Semantic search requires AWS Bedrock access. Create a vector index first:
+    JSON OUTPUT SCHEMA:
+        Standard: [{"id": "...", "type": "paper|book|media", "score": 0.85, "title": "..."}]
+        Hybrid:   {"bm25_results": [...], "semantic_results": [...], "overlap": ["id1", ...]}
+
+    \b
+    NOTE: Semantic and hybrid search require AWS Bedrock access. Create a vector index first:
         paper-index-tool vector create nova-1024 --model nova --dimensions 1024
         paper-index-tool vector default nova-1024
     """
@@ -3924,6 +3961,22 @@ def query_command(
             err=True,
         )
         raise typer.Exit(1)
+
+    # Validate --both flag
+    if both:
+        if not all_entries:
+            typer.echo(
+                "Error: --both requires --all. Cannot use --both with --paper or --book.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if semantic:
+            typer.echo(
+                "Error: --both and --semantic are mutually exclusive. "
+                "Use --both for hybrid search or --semantic for semantic-only.",
+                err=True,
+            )
+            raise typer.Exit(1)
 
     # Handle book search separately (not yet integrated in searcher)
     if book_id:
@@ -4054,6 +4107,172 @@ def query_command(
         except VectorSearchError as e:
             typer.echo(f"Error: {e}", err=True)
             raise typer.Exit(1)
+
+    # Handle hybrid search (--both)
+    elif both:
+        try:
+            from paper_index_tool.settings import get_default_vector_index
+            from paper_index_tool.vector import VectorSearcher
+            from paper_index_tool.vector.errors import (
+                IndexNotFoundError,
+                NamedIndexNotFoundError,
+                VectorSearchError,
+            )
+        except ImportError:
+            typer.echo(
+                "Error: Vector search dependencies not installed. "
+                "Install with: pip install paper-index-tool[vector] or uv sync --extra vector",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        from paper_index_tool.search import CombinedSearcher
+
+        # Run BM25 search
+        try:
+            combined = CombinedSearcher()
+            bm25_results = combined.search(
+                query=search_query,
+                top_k=num_results,
+                extract_fragments_flag=fragments,
+                context_lines=context,
+            )
+        except ValueError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+
+        # Run semantic search
+        try:
+            effective_index = index_name
+            if effective_index is None:
+                effective_index = get_default_vector_index()
+
+            vector_searcher = VectorSearcher(index_name=effective_index)
+
+            if not vector_searcher.index_exists():
+                if effective_index:
+                    typer.echo(
+                        f"Error: Vector index '{effective_index}' not found or not built. "
+                        f"Build it with: paper-index-tool vector rebuild {effective_index}",
+                        err=True,
+                    )
+                else:
+                    typer.echo(
+                        "Error: No vector index found. Create one with:\n"
+                        "  paper-index-tool vector create <name> --model <model>\n"
+                        "Or use legacy index: paper-index-tool reindex --vectors",
+                        err=True,
+                    )
+                raise typer.Exit(1)
+
+            semantic_results = vector_searcher.search(
+                query=search_query,
+                entry_id=None,
+                top_k=num_results,
+                extract_fragments_flag=fragments,
+                context_lines=context,
+            )
+        except NamedIndexNotFoundError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        except IndexNotFoundError:
+            typer.echo(
+                "Error: Vector index not found. Build it first with: "
+                "paper-index-tool reindex --vectors",
+                err=True,
+            )
+            raise typer.Exit(1)
+        except VectorSearchError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+
+        # Detect overlap
+        bm25_ids = {r.entry_id for r in bm25_results}
+        semantic_ids = {r.entry_id for r in semantic_results}
+        overlap_ids = sorted(bm25_ids & semantic_ids)
+
+        # Output results
+        if output_format == OutputFormat.JSON:
+            bm25_data = []
+            for r in bm25_results:
+                bm25_item: dict[str, Any] = {
+                    "id": r.entry_id,
+                    "type": r.entry_type.value,
+                    "score": r.score,
+                    "title": r.entry.title if r.entry else None,
+                }
+                if fragments:
+                    bm25_item["fragments"] = r.fragments
+                bm25_data.append(bm25_item)
+
+            semantic_data = []
+            for r in semantic_results:
+                semantic_item: dict[str, Any] = {
+                    "id": r.entry_id,
+                    "type": r.entry_type.value,
+                    "score": r.score,
+                    "title": r.entry.title if r.entry else None,
+                }
+                if fragments:
+                    semantic_item["fragments"] = r.fragments
+                semantic_data.append(semantic_item)
+
+            output = {
+                "bm25_results": bm25_data,
+                "semantic_results": semantic_data,
+                "overlap": overlap_ids,
+            }
+            typer.echo(json.dumps(output, indent=2))
+        else:
+            # Human-readable output
+            typer.echo("=== BM25 Results (keyword match) ===")
+            if not bm25_results:
+                typer.echo("No BM25 results found")
+            else:
+                for i, r in enumerate(bm25_results, 1):
+                    title = r.entry.title if r.entry else "No title"
+                    typer.echo(f"[{i}] {r.entry_id} (score: {r.score:.2f})")
+                    typer.echo(f"    Title: {title}")
+                    if r.entry_type.value != "paper":
+                        typer.echo(f"    Type: {r.entry_type.value}")
+
+                    if fragments and r.fragments:
+                        for j, frag in enumerate(r.fragments, 1):
+                            line_range = f"{frag['line_start']}-{frag['line_end']}"
+                            typer.echo(f"\n    Fragment {j} (lines {line_range}):")
+                            typer.echo("    " + "-" * 40)
+                            for line in frag["lines"]:
+                                typer.echo(f"    {line}")
+                    typer.echo()
+
+            typer.echo("\n=== Semantic Results (meaning match) ===")
+            if not semantic_results:
+                typer.echo("No semantic results found")
+            else:
+                for i, r in enumerate(semantic_results, 1):
+                    title = r.entry.title if r.entry else "No title"
+                    typer.echo(f"[{i}] {r.entry_id} (score: {r.score:.2f})")
+                    typer.echo(f"    Title: {title}")
+                    if r.entry_type.value != "paper":
+                        typer.echo(f"    Type: {r.entry_type.value}")
+
+                    if fragments and r.fragments:
+                        for j, frag in enumerate(r.fragments, 1):
+                            line_range = f"{frag['line_start']}-{frag['line_end']}"
+                            typer.echo(f"\n    Fragment {j} (lines {line_range}):")
+                            typer.echo("    " + "-" * 40)
+                            for line in frag["lines"]:
+                                typer.echo(f"    {line}")
+                    typer.echo()
+
+            typer.echo("\n=== Found in both ===")
+            if overlap_ids:
+                for entry_id in overlap_ids:
+                    typer.echo(f"  - {entry_id}")
+            else:
+                typer.echo("  (no overlap)")
+
+        return
 
     # Use CombinedSearcher for --all, PaperSearcher for single paper (BM25)
     elif all_entries:
