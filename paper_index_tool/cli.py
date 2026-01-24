@@ -1379,16 +1379,28 @@ def paper_query(
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
+    semantic: Annotated[
+        bool, typer.Option("--semantic", "-s", help="Semantic search (natural language)")
+    ] = False,
+    index_name: Annotated[
+        str | None, typer.Option("--index", "-i", help="Named vector index for semantic search")
+    ] = None,
 ) -> None:
-    """Search within a single paper using BM25.
+    """Search within a single paper.
 
     \b
     Convenience command equivalent to: query "terms" --paper <id>
 
     \b
+    SEARCH TYPE:
+        (default)       BM25 keyword search
+        --semantic, -s  Semantic search (natural language)
+
+    \b
     Examples:
         paper-index-tool paper query cesinger2023 "narcissism commitment"
         paper-index-tool paper query ashford2012 "leadership identity" --fragments
+        paper-index-tool paper query ashford2012 "How do leaders develop?" -s
     """
     # Delegate to main query command
     query_command(
@@ -1396,6 +1408,8 @@ def paper_query(
         paper_id=paper_id,
         book_id=None,
         all_entries=False,
+        semantic=semantic,
+        index_name=index_name,
         fragments=fragments,
         context=context,
         num_results=num_results,
@@ -2101,6 +2115,12 @@ def book_query(
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
+    semantic: Annotated[
+        bool, typer.Option("--semantic", "-s", help="Semantic search (natural language)")
+    ] = False,
+    index_name: Annotated[
+        str | None, typer.Option("--index", "-i", help="Named vector index for semantic search")
+    ] = None,
 ) -> None:
     """Search within a book or all chapters if basename given.
 
@@ -2110,10 +2130,16 @@ def book_query(
     searches all chapters and returns union of results with chapter ID prefixes.
 
     \b
+    SEARCH TYPE:
+        (default)       BM25 keyword search
+        --semantic, -s  Semantic search (natural language)
+
+    \b
     Examples:
         paper-index-tool book query vogelgesang2023ch1 "leadership"  # Single chapter
         paper-index-tool book query vogelgesang2023 "leadership"     # All chapters
         paper-index-tool book query vogelgesang2023 "identity" --fragments
+        paper-index-tool book query vogelgesang2023 "How do leaders grow?" -s  # Semantic
     """
     import bm25s  # type: ignore[import-untyped]
     import Stemmer  # type: ignore[import-not-found]
@@ -2131,6 +2157,8 @@ def book_query(
             paper_id=None,
             book_id=book_id,
             all_entries=False,
+            semantic=semantic,
+            index_name=index_name,
             fragments=fragments,
             context=context,
             num_results=num_results,
@@ -2143,41 +2171,82 @@ def book_query(
     logger.info("Searching %d chapters for basename '%s'", len(chapters), book_id)
 
     all_results: list[dict[str, Any]] = []
-    stemmer = Stemmer.Stemmer("english")
     query_terms = search_query.split()
 
-    for chapter in chapters:
-        content = chapter.get_searchable_text()
-        if not content:
-            continue
+    if semantic:
+        # Semantic search across chapters
+        try:
+            from paper_index_tool.vector.search import VectorSearcher
 
-        # BM25 scoring for this chapter
-        corpus_tokens = bm25s.tokenize([content], stopwords="en", stemmer=stemmer)
-        query_tokens = bm25s.tokenize([search_query], stopwords="en", stemmer=stemmer)
+            searcher = VectorSearcher(index_name=index_name)
+            if not searcher.index_exists():
+                typer.echo(
+                    "Vector index not found. Run 'paper-index-tool vector reindex' first.", err=True
+                )
+                raise typer.Exit(1)
 
-        retriever = bm25s.BM25()
-        retriever.index(corpus_tokens)
-        _results_array, scores_array = retriever.retrieve(query_tokens, k=1)
+            # Search each chapter using vector similarity
+            for chapter in chapters:
+                results = searcher.search(
+                    query=search_query,
+                    entry_id=chapter.id,
+                    top_k=1,
+                    extract_fragments_flag=fragments,
+                    context_lines=context,
+                )
+                if results:
+                    sr = results[0]
+                    chapter_result: dict[str, Any] = {
+                        "id": chapter.id,
+                        "type": "book",
+                        "score": sr.score,
+                        "title": chapter.title or "",
+                    }
+                    if fragments and sr.fragments:
+                        chapter_result["fragments"] = sr.fragments
+                    all_results.append(chapter_result)
+        except ImportError:
+            typer.echo(
+                "Vector search requires faiss-cpu. Install with: uv sync --extra vector",
+                err=True,
+            )
+            raise typer.Exit(1)
+    else:
+        # BM25 keyword search
+        stemmer = Stemmer.Stemmer("english")
 
-        score = float(scores_array[0, 0])
-        if score <= 0:
-            continue
+        for chapter in chapters:
+            content = chapter.get_searchable_text()
+            if not content:
+                continue
 
-        # Extract fragments if requested
-        frags = []
-        if fragments:
-            frags = extract_fragments(content, query_terms, context, max_fragments=3)
+            # BM25 scoring for this chapter
+            corpus_tokens = bm25s.tokenize([content], stopwords="en", stemmer=stemmer)
+            query_tokens = bm25s.tokenize([search_query], stopwords="en", stemmer=stemmer)
 
-        chapter_result: dict[str, Any] = {
-            "id": chapter.id,
-            "type": "book",
-            "score": score,
-            "title": chapter.title or "",
-        }
-        if fragments and frags:
-            chapter_result["fragments"] = frags
+            retriever = bm25s.BM25()
+            retriever.index(corpus_tokens)
+            _results_array, scores_array = retriever.retrieve(query_tokens, k=1)
 
-        all_results.append(chapter_result)
+            score = float(scores_array[0, 0])
+            if score <= 0:
+                continue
+
+            # Extract fragments if requested
+            frags = []
+            if fragments:
+                frags = extract_fragments(content, query_terms, context, max_fragments=3)
+
+            chapter_result = {
+                "id": chapter.id,
+                "type": "book",
+                "score": score,
+                "title": chapter.title or "",
+            }
+            if fragments and frags:
+                chapter_result["fragments"] = frags
+
+            all_results.append(chapter_result)
 
     # Sort by score descending and limit
     all_results.sort(key=lambda x: x["score"], reverse=True)
@@ -2199,7 +2268,8 @@ def book_query(
             if fragments and "fragments" in r:
                 for frag in r["fragments"]:
                     typer.echo(f"  Lines {frag['line_start']}-{frag['line_end']}:")
-                    typer.echo(f"    {frag['text'][:200]}...")
+                    text = "\n".join(frag["lines"])[:200]
+                    typer.echo(f"    {text}...")
                 typer.echo("")
 
 
@@ -2939,14 +3009,28 @@ def media_query(
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.HUMAN,
+    semantic: Annotated[
+        bool, typer.Option("--semantic", "-s", help="Semantic search (natural language)")
+    ] = False,
+    index_name: Annotated[
+        str | None, typer.Option("--index", "-i", help="Named vector index for semantic search")
+    ] = None,
 ) -> None:
-    """Search within a single media entry using BM25.
+    """Search within a single media entry.
+
+    \b
+    SEARCH TYPE:
+        (default)       BM25 keyword search
+        --semantic, -s  Semantic search (natural language)
 
     \b
     Examples:
         paper-index-tool media query ashford2017 "leadership identity"
         paper-index-tool media query ashford2017 "narcissism" --fragments
+        paper-index-tool media query ashford2017 "How do leaders develop?" -s
     """
+    from paper_index_tool.search import extract_fragments
+
     # Search single media entry
     media = _get_media_or_exit(media_id)
     content = media.get_searchable_text()
@@ -2958,33 +3042,68 @@ def media_query(
             typer.echo("No searchable content in media")
         return
 
-    # Use BM25 for scoring
-    import bm25s
-    import Stemmer
-
-    from paper_index_tool.search import extract_fragments
-
-    stemmer = Stemmer.Stemmer("english")
-    corpus_tokens = bm25s.tokenize([content], stopwords="en", stemmer=stemmer)
-    query_tokens = bm25s.tokenize([search_query], stopwords="en", stemmer=stemmer)
-
-    retriever = bm25s.BM25()
-    retriever.index(corpus_tokens)
-    _results_array, scores_array = retriever.retrieve(query_tokens, k=1)
-
-    score = float(scores_array[0, 0])
-    if score <= 0:
-        if output_format == OutputFormat.JSON:
-            typer.echo(json.dumps([]))
-        else:
-            typer.echo("No results found")
-        return
-
-    # Extract fragments if requested
     query_terms = search_query.split()
-    frags = []
-    if fragments:
-        frags = extract_fragments(content, query_terms, context, max_fragments=3)
+    score: float = 0.0
+    frags: list[dict[str, Any]] = []
+
+    if semantic:
+        # Semantic search
+        try:
+            from paper_index_tool.vector.search import VectorSearcher
+
+            searcher = VectorSearcher(index_name=index_name)
+            if not searcher.index_exists():
+                typer.echo(
+                    "Vector index not found. Run 'paper-index-tool vector reindex' first.", err=True
+                )
+                raise typer.Exit(1)
+
+            results = searcher.search(
+                query=search_query,
+                entry_id=media_id,
+                top_k=1,
+                extract_fragments_flag=fragments,
+                context_lines=context,
+            )
+            if not results:
+                if output_format == OutputFormat.JSON:
+                    typer.echo(json.dumps([]))
+                else:
+                    typer.echo("No results found")
+                return
+
+            score = results[0].score
+            frags = results[0].fragments
+        except ImportError:
+            typer.echo(
+                "Vector search requires faiss-cpu. Install with: uv sync --extra vector",
+                err=True,
+            )
+            raise typer.Exit(1)
+    else:
+        # BM25 keyword search
+        import bm25s
+        import Stemmer
+
+        stemmer = Stemmer.Stemmer("english")
+        corpus_tokens = bm25s.tokenize([content], stopwords="en", stemmer=stemmer)
+        query_tokens = bm25s.tokenize([search_query], stopwords="en", stemmer=stemmer)
+
+        retriever = bm25s.BM25()
+        retriever.index(corpus_tokens)
+        _results_array, scores_array = retriever.retrieve(query_tokens, k=1)
+
+        score = float(scores_array[0, 0])
+        if score <= 0:
+            if output_format == OutputFormat.JSON:
+                typer.echo(json.dumps([]))
+            else:
+                typer.echo("No results found")
+            return
+
+        # Extract fragments if requested
+        if fragments:
+            frags = extract_fragments(content, query_terms, context, max_fragments=3)
 
     if output_format == OutputFormat.JSON:
         media_result: dict[str, Any] = {

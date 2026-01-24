@@ -77,3 +77,7 @@ strict = true
 [tool.bandit]
 exclude_dirs = ["tests", ".venv", "venv"]
 skips = ["B101"]  # Skip assert_used (common in tests)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
